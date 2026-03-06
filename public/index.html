@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="it">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>CPI Guardian Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=IBM+Plex+Mono:wght@400;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="background-shape shape-a"></div>
+    <div class="background-shape shape-b"></div>
+    <main class="dashboard">
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">SAP CPI MONITOR</p>
+          <h1>CPI Guardian</h1>
+          <p id="last-update" class="muted">Aggiornamento in corso...</p>
+        </div>
+        <div class="topbar-actions">
+          <button id="refresh-btn" class="btn">Aggiorna ora</button>
+          <label class="switch-wrap" for="auto-refresh">
+            <input id="auto-refresh" type="checkbox" checked />
+            Auto-refresh 30s
+          </label>
+        </div>
+      </header>
+
+      <nav class="tabs">
+        <button class="tab active" data-page="dashboard">Dashboard</button>
+        <button class="tab" data-page="interfaces">Interfacce</button>
+        <button class="tab" data-page="messages">Messaggi</button>
+        <button class="tab" data-page="config">Configurazione</button>
+      </nav>
+
+      <p id="error-banner" class="error hidden"></p>
+
+      <!-- DASHBOARD PAGE -->
+      <div id="page-dashboard" class="page active">
+        <section class="stats-grid" id="stats-grid"></section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Riepilogo Interfacce per Sistema</h2>
+          </div>
+          <div id="interfaces-by-system"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Messaggi Recenti (ultimi 20)</h2>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Flow</th>
+                  <th>MPL ID</th>
+                  <th>Stato</th>
+                  <th>Custom Header</th>
+                  <th>Allegati</th>
+                </tr>
+              </thead>
+              <tbody id="recent-messages-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- INTERFACES PAGE -->
+      <div id="page-interfaces" class="page">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Stato Interfacce</h2>
+            <div class="filter-group">
+              <input
+                id="interface-system-filter"
+                list="interface-system-options"
+                aria-label="Filtro sistema"
+                placeholder="Cerca sistema interfacce..."
+                autocomplete="off"
+              />
+              <datalist id="interface-system-options"></datalist>
+            </div>
+          </div>
+          <div id="interfaces-body"></div>
+        </section>
+      </div>
+
+      <!-- MESSAGES PAGE -->
+      <div id="page-messages" class="page">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Messaggi</h2>
+            <div class="filter-group">
+              <span id="message-interface-context" class="muted compact hidden"></span>
+              <button id="clear-message-interface-filter-btn" class="btn btn-compact hidden" type="button">Rimuovi filtro interfaccia</button>
+              <input
+                id="message-system-filter"
+                list="message-system-options"
+                aria-label="Filtro sistema"
+                placeholder="Cerca sistema messaggi..."
+                autocomplete="off"
+              />
+              <datalist id="message-system-options"></datalist>
+              <select id="message-status-filter" aria-label="Filtro stato">
+                <option value="">Tutti gli stati</option>
+                <option value="SUCCESS">SUCCESS</option>
+                <option value="FAILED">FAILED</option>
+                <option value="PROCESSING">PROCESSING</option>
+              </select>
+              <select id="message-time-filter" aria-label="Filtro intervallo temporale">
+                <option value="">Tutto il periodo</option>
+                <option value="5m">Ultimi 5 minuti</option>
+                <option value="15m">Ultimi 15 minuti</option>
+                <option value="30m">Ultimi 30 minuti</option>
+                <option value="1h">Ultima ora</option>
+                <option value="6h">Ultime 6 ore</option>
+                <option value="24h">Ultime 24 ore</option>
+                <option value="7d">Ultimi 7 giorni</option>
+                <option value="30d">Ultimi 30 giorni</option>
+              </select>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Sistema</th>
+                  <th>Flow</th>
+                  <th>MPL ID</th>
+                  <th>Stato</th>
+                  <th>Custom Header</th>
+                  <th>Allegati</th>
+                </tr>
+              </thead>
+              <tbody id="messages-body"></tbody>
+            </table>
+          </div>
+        </section>
+      </div>
+
+      <!-- CONFIG PAGE -->
+      <div id="page-config" class="page">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Connessione CPI (Service Key JSON)</h2>
+          </div>
+          <p class="muted compact">
+            Carica un file JSON della service key oppure incolla il contenuto e premi Applica.
+          </p>
+          <div class="service-key-tools">
+            <input id="service-key-file" type="file" accept=".json,application/json" />
+            <button id="apply-service-key-btn" class="btn">Applica service key</button>
+          </div>
+          <textarea
+            id="service-key-json"
+            class="service-key-input"
+            rows="8"
+            placeholder='{
+  "oauth": {
+    "clientid": "...",
+    "clientsecret": "...",
+    "tokenurl": "...",
+    "url": "https://tenant..."
+  }
+}'
+          ></textarea>
+          <p id="config-status" class="muted compact"></p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Stato Connessione</h2>
+          </div>
+          <div id="connection-status"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Cache Messaggi (30 giorni)</h2>
+          </div>
+          <p class="muted compact">
+            Scarica tutti i log messaggi disponibili su SAP CPI (finestra massima 30 giorni) e usa la cache per filtri rapidi.
+          </p>
+          <div class="service-key-tools">
+            <button id="sync-message-cache-btn" class="btn">Scarica log completi</button>
+            <button id="refresh-message-cache-status-btn" class="btn">Aggiorna stato</button>
+          </div>
+          <p id="message-cache-status" class="muted compact">Stato cache non ancora caricato.</p>
+        </section>
+      </div>
+
+      <footer class="brand-footer">
+        <div class="brand-footer-left">
+          <img
+            class="brand-logo"
+            src="https://hnrg.it/assets/images/logos/logo-hnrg-white.svg"
+            alt="HNRG"
+            loading="lazy"
+          />
+        </div>
+        <p class="brand-copy">© 2026 HNRG / H-energy1 S.r.l. All rights reserved.</p>
+      </footer>
+    </main>
+
+    <div id="attachment-viewer" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="attachment-viewer-title">
+      <div class="modal-backdrop" data-action="close-attachment-viewer"></div>
+      <div class="modal-content">
+        <div class="modal-head">
+          <h3 id="attachment-viewer-title">Anteprima allegato</h3>
+          <button id="close-attachment-viewer-btn" class="btn btn-compact" type="button">Chiudi</button>
+        </div>
+        <p id="attachment-viewer-meta" class="muted compact"></p>
+        <div id="attachment-viewer-body" class="attachment-viewer-body"></div>
+      </div>
+    </div>
+
+    <script src="app.js"></script>
+  </body>
+</html>
