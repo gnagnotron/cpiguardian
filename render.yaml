@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: cpiguardian
+    runtime: node
+    plan: free
+    autoDeploy: true
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+      - key: PORT
+        value: 10000
+      - key: CPI_BASE_URL
+        sync: false
+      - key: CPI_AUTH_TYPE
+        value: oauth
+      - key: CPI_TOKEN_URL
+        sync: false
+      - key: CPI_CLIENT_ID
+        sync: false
+      - key: CPI_CLIENT_SECRET
+        sync: false
+      - key: CPI_OAUTH_SCOPE
+        sync: false
+      - key: CPI_MESSAGES_TOP
+        value: 100
+      - key: CPI_CACHE_WINDOW_DAYS
+        value: 30
+      - key: CPI_CACHE_PAGE_SIZE
+        value: 500
+      - key: CPI_CACHE_MAX_PAGES
+        value: 200
+      - key: CPI_CACHE_MAX_ITEMS
+        value: 15000
+      - key: CPI_CACHE_API_DEFAULT_LIMIT
+        value: 3000
+      - key: CPI_PRELOAD_ATTACHMENTS
+        value: false
+      - key: CPI_ATTACHMENT_PREFETCH_LIMIT
+        value: 1500
