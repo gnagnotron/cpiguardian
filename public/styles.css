@@ -416,6 +416,42 @@ input[list] {
   min-width: 220px;
 }
 
+input[type="number"] {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(0, 0, 0, 0.18);
+  padding: 7px 10px;
+  color: var(--ink);
+  font-family: inherit;
+  min-width: 200px;
+}
+
+.bulk-download-tools {
+  align-items: center;
+}
+
+.progress-wrap {
+  margin: 8px 0 10px;
+}
+
+.progress-track {
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.12);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+
+.progress-fill {
+  display: block;
+  height: 100%;
+  width: 0;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #9fe0c1, #ffd490);
+  transition: width 220ms ease;
+}
+
 .table-wrap {
   overflow: auto;
   border-radius: 12px;
@@ -478,38 +514,21 @@ tbody tr:hover {
   cursor: pointer;
   border-radius: 14px;
   padding: 13px;
+}
+
 .mpl-link:hover {
   filter: brightness(0.95);
   text-decoration: underline;
-  margin: 0 0 8px 0;
+}
 
 .custom-headers {
   min-width: 220px;
-
-.system-card-alert {
-  border-color: rgba(255, 139, 154, 0.4);
-}
-
-.system-health-meter {
-  height: 6px;
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 999px;
-  overflow: hidden;
-  margin-bottom: 10px;
-}
-
-.system-health-meter span {
-  display: block;
-  height: 100%;
-  border-radius: inherit;
-  background: linear-gradient(90deg, #ffd490, #9fe0c1);
-}
   max-width: 340px;
   white-space: normal;
   word-break: break-word;
   line-height: 1.25;
-  gap: 5px;
   font-size: 0.84rem;
+}
 
 .attachments-cell {
   min-width: 220px;

@@ -2,7 +2,24 @@ const express = require("express");
 const morgan = require("morgan");
 const path = require("path");
 const fs = require("fs");
+const archiverModule = require("archiver");
 const dotenv = require("dotenv");
+
+function createZipArchive(options = {}) {
+  if (typeof archiverModule === "function") {
+    return archiverModule("zip", options);
+  }
+
+  if (archiverModule && typeof archiverModule.create === "function") {
+    return archiverModule.create("zip", options);
+  }
+
+  if (archiverModule && typeof archiverModule.ZipArchive === "function") {
+    return new archiverModule.ZipArchive(options);
+  }
+
+  throw new Error("Modulo archiver non supportato in questo runtime.");
+}
 
 dotenv.config();
 
@@ -40,6 +57,8 @@ const interfacePackageLookupCache = {
   expiresAt: 0,
   inFlight: null
 };
+
+const attachmentExportProgress = new Map();
 
 const messageCacheState = {
   items: [],
@@ -92,6 +111,30 @@ function parseLogTimestamp(value) {
 
 function getMessageLogTimestamp(item) {
   return parseLogTimestamp(item.logEnd || item.logStart);
+}
+
+function getTimeThresholdMs(range) {
+  const now = Date.now();
+  switch (String(range || "").trim()) {
+    case "5m":
+      return now - 5 * 60 * 1000;
+    case "15m":
+      return now - 15 * 60 * 1000;
+    case "30m":
+      return now - 30 * 60 * 1000;
+    case "1h":
+      return now - 60 * 60 * 1000;
+    case "6h":
+      return now - 6 * 60 * 60 * 1000;
+    case "24h":
+      return now - 24 * 60 * 60 * 1000;
+    case "7d":
+      return now - 7 * 24 * 60 * 60 * 1000;
+    case "30d":
+      return now - 30 * 24 * 60 * 60 * 1000;
+    default:
+      return null;
+  }
 }
 
 function refreshCacheTimeBounds() {
@@ -746,6 +789,51 @@ function mapAttachmentItem(item) {
   };
 }
 
+function sanitizeZipSegment(value, fallback = "unknown") {
+  const cleaned = String(value || "")
+    .trim()
+    .replace(/[<>:"/\\|?*\x00-\x1F]/g, "_")
+    .replace(/\s+/g, "-")
+    .replace(/\.+/g, ".")
+    .replace(/^\.+/, "")
+    .replace(/\.+$/, "")
+    .slice(0, 80);
+
+  return cleaned || fallback;
+}
+
+function parseAttachmentUriFromDownloadUrl(downloadUrl) {
+  if (!downloadUrl) {
+    return "";
+  }
+
+  try {
+    const parsed = new URL(downloadUrl, "http://localhost");
+    return String(parsed.searchParams.get("uri") || "").trim();
+  } catch (_error) {
+    return "";
+  }
+}
+
+function buildAttachmentExportFileName(filters) {
+  const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+  const chunks = ["mpl-attachments", stamp];
+
+  if (filters.packageFilter) {
+    chunks.push(`pkg-${sanitizeZipSegment(filters.packageFilter, "pkg")}`);
+  }
+
+  if (filters.iflowFilter) {
+    chunks.push(`iflow-${sanitizeZipSegment(filters.iflowFilter, "iflow")}`);
+  }
+
+  if (filters.statusFilter) {
+    chunks.push(`status-${sanitizeZipSegment(filters.statusFilter, "status")}`);
+  }
+
+  return `${chunks.join("_")}.zip`;
+}
+
 async function fetchAttachmentsForMpl(mplId) {
   const safeMplId = String(mplId || "").trim().replace(/'/g, "''");
   if (!safeMplId) {
@@ -1105,6 +1193,264 @@ app.get("/api/cpi/attachments/preview", async (req, res) => {
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/cpi/attachments/export/progress/:progressId", (req, res) => {
+  const progressId = String(req.params.progressId || "").trim();
+  if (!progressId) {
+    return res.status(400).json({
+      error: "Progress ID mancante."
+    });
+  }
+
+  const state = attachmentExportProgress.get(progressId);
+  if (!state) {
+    return res.status(404).json({
+      error: "Progress non trovato o scaduto."
+    });
+  }
+
+  return res.json({
+    ok: true,
+    progressId,
+    state
+  });
+});
+
+app.get("/api/cpi/attachments/export.zip", async (req, res) => {
+  const packageFilter = String(req.query.package || "").trim();
+  const iflowFilter = String(req.query.iflow || "").trim();
+  const statusFilter = String(req.query.status || "").trim().toUpperCase();
+  const timeRangeFilter = String(req.query.timeRange || "").trim();
+  const progressId = String(req.query.progressId || "").trim();
+  const includeUnknown = String(req.query.includeUnknown || "false").toLowerCase() === "true";
+
+  const progressState = {
+    status: "running",
+    startedAt: new Date().toISOString(),
+    finishedAt: null,
+    totalMpl: 0,
+    mplProcessed: 0,
+    mplWithAttachments: 0,
+    attachmentsAdded: 0,
+    errorsCount: 0,
+    message: "Preparazione export in corso..."
+  };
+
+  if (progressId) {
+    attachmentExportProgress.set(progressId, progressState);
+  }
+
+  const requestedLimitMpl = Number(req.query.limitMpl || 0);
+  const safeLimitMpl =
+    Number.isNaN(requestedLimitMpl) || requestedLimitMpl <= 0 ? Number.MAX_SAFE_INTEGER : Math.min(requestedLimitMpl, 5000);
+
+  if (messageCacheState.sync.inProgress) {
+    return res.status(409).json({
+      error: "Sincronizzazione cache in corso. Riprova al termine del download log."
+    });
+  }
+
+  let sourceMessages = messageCacheState.items.slice();
+  if (!includeUnknown) {
+    sourceMessages = sourceMessages.filter((item) => item.package && item.package !== "UNKNOWN");
+  }
+
+  if (packageFilter) {
+    sourceMessages = sourceMessages.filter((item) => String(item.package || "") === packageFilter);
+  }
+
+  if (iflowFilter) {
+    sourceMessages = sourceMessages.filter((item) => String(item.integrationFlow || "") === iflowFilter);
+  }
+
+  if (statusFilter) {
+    sourceMessages = sourceMessages.filter((item) => String(item.status || "").toUpperCase() === statusFilter);
+  }
+
+  const timeThreshold = getTimeThresholdMs(timeRangeFilter);
+  if (timeThreshold !== null) {
+    sourceMessages = sourceMessages.filter((item) => {
+      const ts = getMessageLogTimestamp(item);
+      return ts !== null && ts >= timeThreshold;
+    });
+  }
+
+  sourceMessages = sourceMessages.slice(0, safeLimitMpl);
+
+  const filters = {
+    packageFilter,
+    iflowFilter,
+    statusFilter
+  };
+  const fileName = buildAttachmentExportFileName(filters);
+
+  res.setHeader("Content-Type", "application/zip");
+  res.setHeader("Content-Disposition", `attachment; filename=\"${fileName}\"`);
+
+  const archive = createZipArchive({
+    zlib: { level: 9 }
+  });
+
+  progressState.totalMpl = sourceMessages.length;
+  if (sourceMessages.length === 0) {
+    progressState.status = "finalizing";
+    progressState.message = "Nessun log compatibile con i filtri. Generazione report export.";
+  }
+
+  archive.on("error", (error) => {
+    if (progressId) {
+      progressState.status = "failed";
+      progressState.finishedAt = new Date().toISOString();
+      progressState.message = error.message;
+    }
+
+    if (!res.headersSent) {
+      res.status(500).json({ error: error.message });
+      return;
+    }
+
+    res.destroy(error);
+  });
+
+  archive.pipe(res);
+
+  const usedPaths = new Set();
+  const errors = [];
+  let mplProcessed = 0;
+  let mplWithAttachments = 0;
+  let attachmentsAdded = 0;
+
+  for (const message of sourceMessages) {
+    const mplId = String(message.mplId || message.id || "").trim();
+    if (!mplId) {
+      continue;
+    }
+
+    mplProcessed += 1;
+    if (progressId) {
+      progressState.mplProcessed = mplProcessed;
+      progressState.message = `Analisi log ${mplProcessed}/${sourceMessages.length}`;
+    }
+    const packageName = sanitizeZipSegment(message.package || "UNKNOWN", "UNKNOWN");
+    const flowName = sanitizeZipSegment(message.integrationFlow || "iflow", "iflow");
+    const mplFolder = sanitizeZipSegment(mplId, "mpl");
+
+    let attachments = [];
+    try {
+      if (message.attachmentsLoaded && Array.isArray(message.attachments)) {
+        attachments = message.attachments;
+      } else {
+        const resolved = await fetchAttachmentsForMplWithFallback(mplId);
+        attachments = resolved.items;
+      }
+    } catch (error) {
+      errors.push({
+        mplId,
+        stage: "attachments-list",
+        error: error.message
+      });
+      continue;
+    }
+
+    if (!Array.isArray(attachments) || attachments.length === 0) {
+      continue;
+    }
+
+    mplWithAttachments += 1;
+    if (progressId) {
+      progressState.mplWithAttachments = mplWithAttachments;
+    }
+
+    for (let index = 0; index < attachments.length; index += 1) {
+      const attachment = attachments[index];
+      const uri = parseAttachmentUriFromDownloadUrl(attachment.downloadUrl);
+      if (!uri) {
+        errors.push({
+          mplId,
+          stage: "attachment-uri",
+          attachment: attachment.name || attachment.id || `item-${index + 1}`,
+          error: "URI allegato non disponibile"
+        });
+        continue;
+      }
+
+      const attachmentName = sanitizeZipSegment(attachment.name || attachment.id || `attachment-${index + 1}`, `attachment-${index + 1}`);
+      const basePath = `${packageName}/${flowName}/${mplFolder}/${String(index + 1).padStart(2, "0")}_${attachmentName}`;
+
+      let archivePath = basePath;
+      let duplicateCount = 1;
+      while (usedPaths.has(archivePath)) {
+        duplicateCount += 1;
+        archivePath = `${basePath}_${duplicateCount}`;
+      }
+      usedPaths.add(archivePath);
+
+      try {
+        const raw = await cpiFetchRawByUrl(uri, "*/*");
+        const payloadBuffer = Buffer.from(await raw.arrayBuffer());
+        archive.append(payloadBuffer, { name: archivePath });
+        attachmentsAdded += 1;
+        if (progressId) {
+          progressState.attachmentsAdded = attachmentsAdded;
+        }
+      } catch (error) {
+        errors.push({
+          mplId,
+          stage: "attachment-download",
+          attachment: attachment.name || attachment.id || `item-${index + 1}`,
+          error: error.message
+        });
+        if (progressId) {
+          progressState.errorsCount = errors.length;
+        }
+      }
+    }
+  }
+
+  const report = {
+    generatedAt: new Date().toISOString(),
+    filters: {
+      package: packageFilter || null,
+      iflow: iflowFilter || null,
+      status: statusFilter || null,
+      timeRange: timeRangeFilter || null,
+      includeUnknown
+    },
+    sourceMessagesCount: sourceMessages.length,
+    mplProcessed,
+    mplWithAttachments,
+    attachmentsAdded,
+    errorsCount: errors.length,
+    errors,
+    note:
+      sourceMessages.length === 0
+        ? "Nessun log in cache compatibile con i filtri selezionati."
+        : null
+  };
+
+  archive.append(JSON.stringify(report, null, 2), {
+    name: "_export-report.json"
+  });
+
+  if (progressId) {
+    progressState.status = "finalizing";
+    progressState.message = "Finalizzazione ZIP...";
+    progressState.errorsCount = errors.length;
+  }
+
+  await archive.finalize();
+
+  if (progressId) {
+    progressState.status = "completed";
+    progressState.finishedAt = new Date().toISOString();
+    progressState.message = "Export completato";
+    progressState.errorsCount = errors.length;
+
+    setTimeout(() => {
+      attachmentExportProgress.delete(progressId);
+    }, 15 * 60 * 1000);
   }
 });
 

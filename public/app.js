@@ -24,6 +24,18 @@ const connectionStatusEl = document.getElementById("connection-status");
 const syncMessageCacheBtnEl = document.getElementById("sync-message-cache-btn");
 const refreshMessageCacheStatusBtnEl = document.getElementById("refresh-message-cache-status-btn");
 const messageCacheStatusEl = document.getElementById("message-cache-status");
+const bulkPackageFilterEl = document.getElementById("bulk-package-filter");
+const bulkPackageOptionsEl = document.getElementById("bulk-package-options");
+const bulkIflowFilterEl = document.getElementById("bulk-iflow-filter");
+const bulkIflowOptionsEl = document.getElementById("bulk-iflow-options");
+const bulkStatusFilterEl = document.getElementById("bulk-status-filter");
+const bulkTimeFilterEl = document.getElementById("bulk-time-filter");
+const bulkLimitMplEl = document.getElementById("bulk-limit-mpl");
+const bulkDownloadAttachmentsBtnEl = document.getElementById("bulk-download-attachments-btn");
+const bulkDownloadStatusEl = document.getElementById("bulk-download-status");
+const bulkDownloadProgressEl = document.getElementById("bulk-download-progress");
+const bulkDownloadProgressBarEl = document.getElementById("bulk-download-progress-bar");
+const bulkDownloadProgressTextEl = document.getElementById("bulk-download-progress-text");
 const attachmentViewerEl = document.getElementById("attachment-viewer");
 const attachmentViewerMetaEl = document.getElementById("attachment-viewer-meta");
 const attachmentViewerBodyEl = document.getElementById("attachment-viewer-body");
@@ -44,6 +56,7 @@ let cacheStatusPollTimerId = null;
 let activeInterfaceMessageFilter = null;
 const attachmentsByMplId = new Map();
 const attachmentsLoading = new Set();
+let bulkExportProgressPollTimerId = null;
 
 // Extract system name from interface/flow name
 function extractSystem(name) {
@@ -458,6 +471,102 @@ function setMessageCacheStatus(message, isError = false) {
   messageCacheStatusEl.innerHTML = message || "";
 }
 
+function setBulkDownloadStatus(message, isError = false) {
+  if (!bulkDownloadStatusEl) {
+    return;
+  }
+
+  bulkDownloadStatusEl.classList.toggle("error-inline", Boolean(isError));
+  bulkDownloadStatusEl.textContent = message || "";
+}
+
+function stopBulkExportProgressPolling() {
+  if (bulkExportProgressPollTimerId) {
+    clearInterval(bulkExportProgressPollTimerId);
+    bulkExportProgressPollTimerId = null;
+  }
+}
+
+function setBulkExportProgress(percent, text = "") {
+  if (!bulkDownloadProgressEl || !bulkDownloadProgressBarEl || !bulkDownloadProgressTextEl) {
+    return;
+  }
+
+  const safePercent = Math.max(0, Math.min(100, Number(percent) || 0));
+  bulkDownloadProgressEl.classList.remove("hidden");
+  bulkDownloadProgressBarEl.style.width = `${safePercent}%`;
+
+  const progressTrack = bulkDownloadProgressEl.querySelector(".progress-track");
+  if (progressTrack) {
+    progressTrack.setAttribute("aria-valuenow", String(Math.round(safePercent)));
+  }
+
+  bulkDownloadProgressTextEl.textContent = text || `${Math.round(safePercent)}%`;
+}
+
+function hideBulkExportProgress() {
+  if (!bulkDownloadProgressEl || !bulkDownloadProgressBarEl || !bulkDownloadProgressTextEl) {
+    return;
+  }
+
+  bulkDownloadProgressEl.classList.add("hidden");
+  bulkDownloadProgressBarEl.style.width = "0%";
+  bulkDownloadProgressTextEl.textContent = "0%";
+}
+
+function computeBulkProgressPercent(state) {
+  const total = Number(state?.totalMpl || 0);
+  const done = Number(state?.mplProcessed || 0);
+  if (total <= 0) {
+    return state?.status === "completed" ? 100 : 0;
+  }
+
+  return Math.round((done / total) * 100);
+}
+
+async function fetchBulkExportProgress(progressId) {
+  const response = await fetch(`/api/cpi/attachments/export/progress/${encodeURIComponent(progressId)}`);
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Impossibile leggere stato export");
+  }
+
+  return response.json();
+}
+
+function startBulkExportProgressPolling(progressId) {
+  stopBulkExportProgressPolling();
+
+  const poll = async () => {
+    try {
+      const payload = await fetchBulkExportProgress(progressId);
+      const state = payload.state || {};
+      const percent = computeBulkProgressPercent(state);
+      const label = `${percent}% - MPL ${state.mplProcessed || 0}/${state.totalMpl || 0} - allegati ${state.attachmentsAdded || 0}`;
+      setBulkExportProgress(percent, label);
+
+      if (state.status === "finalizing") {
+        setBulkExportProgress(99, "Finalizzazione ZIP...");
+      }
+
+      if (state.status === "completed") {
+        setBulkExportProgress(100, `100% - Completato (allegati: ${state.attachmentsAdded || 0})`);
+        stopBulkExportProgressPolling();
+      }
+
+      if (state.status === "failed") {
+        stopBulkExportProgressPolling();
+        setBulkDownloadStatus(state.message || "Export fallito", true);
+      }
+    } catch (_error) {
+      // Ignore transient polling errors while the export request is still active.
+    }
+  };
+
+  poll();
+  bulkExportProgressPollTimerId = setInterval(poll, 1200);
+}
+
 function formatCacheStatus(meta, inProgress) {
   if (!meta) {
     return "Stato cache non disponibile.";
@@ -537,6 +646,150 @@ function populateSystemFilters() {
   
   updateSystemInput(interfaceSystemFilterEl, interfaceSystemOptionsEl, sortedInterfaceSystems);
   updateSystemInput(messageSystemFilterEl, messageSystemOptionsEl, sortedMessageSystems);
+}
+
+function populateBulkAttachmentFilters() {
+  const updateInputWithOptions = (inputEl, datalistEl, values) => {
+    if (!inputEl || !datalistEl) {
+      return;
+    }
+
+    const sorted = Array.from(values).sort((a, b) => a.localeCompare(b));
+    const currentValue = String(inputEl.value || "").trim();
+
+    datalistEl.innerHTML = sorted.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+    if (currentValue && !sorted.includes(currentValue)) {
+      inputEl.value = "";
+    }
+  };
+
+  const packageValues = new Set();
+  const iflowValues = new Set();
+
+  (overviewCache.messages || []).forEach((item) => {
+    const pkg = String(item.package || "").trim();
+    const iflow = String(item.integrationFlow || "").trim();
+
+    if (pkg && pkg !== "UNKNOWN") {
+      packageValues.add(pkg);
+    }
+
+    if (iflow) {
+      iflowValues.add(iflow);
+    }
+  });
+
+  updateInputWithOptions(bulkPackageFilterEl, bulkPackageOptionsEl, packageValues);
+  updateInputWithOptions(bulkIflowFilterEl, bulkIflowOptionsEl, iflowValues);
+}
+
+function parseDownloadFileNameFromHeaders(response) {
+  const contentDisposition = String(response.headers.get("content-disposition") || "");
+  const utfMatch = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utfMatch && utfMatch[1]) {
+    return decodeURIComponent(utfMatch[1]).replace(/[\r\n"]/g, "");
+  }
+
+  const plainMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+  if (plainMatch && plainMatch[1]) {
+    return plainMatch[1].replace(/[\r\n"]/g, "");
+  }
+
+  return `mpl-attachments-${new Date().toISOString().replace(/[:.]/g, "-")}.zip`;
+}
+
+function getReadableFetchError(error) {
+  const raw = String(error?.message || "").trim();
+  if (!raw) {
+    return "Errore durante il download allegati.";
+  }
+
+  const normalized = raw.toLowerCase();
+  if (normalized.includes("failed to fetch") || normalized.includes("networkerror") || normalized.includes("load failed")) {
+    return "Server non raggiungibile. Verifica che l'app sia avviata su http://localhost:3000.";
+  }
+
+  return raw;
+}
+
+async function downloadBulkAttachmentsZip() {
+  if (!bulkDownloadAttachmentsBtnEl) {
+    return;
+  }
+
+  bulkDownloadAttachmentsBtnEl.disabled = true;
+  hideBulkExportProgress();
+  setBulkDownloadStatus("Preparazione export allegati in corso...");
+
+  try {
+    const query = new URLSearchParams();
+    const progressId =
+      typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+        ? crypto.randomUUID()
+        : `progress-${Date.now()}-${Math.floor(Math.random() * 100000)}`;
+    const packageFilter = String(bulkPackageFilterEl?.value || "").trim();
+    const iflowFilter = String(bulkIflowFilterEl?.value || "").trim();
+    const statusFilter = String(bulkStatusFilterEl?.value || "").trim().toUpperCase();
+    const timeRangeFilter = String(bulkTimeFilterEl?.value || "").trim();
+    const limitMplRaw = String(bulkLimitMplEl?.value || "").trim();
+
+    query.set("progressId", progressId);
+
+    if (packageFilter) {
+      query.set("package", packageFilter);
+    }
+
+    if (iflowFilter) {
+      query.set("iflow", iflowFilter);
+    }
+
+    if (statusFilter) {
+      query.set("status", statusFilter);
+    }
+
+    if (timeRangeFilter) {
+      query.set("timeRange", timeRangeFilter);
+    }
+
+    if (limitMplRaw) {
+      query.set("limitMpl", limitMplRaw);
+    }
+
+    const url = `/api/cpi/attachments/export.zip${query.toString() ? `?${query.toString()}` : ""}`;
+    startBulkExportProgressPolling(progressId);
+    const response = await fetch(url);
+
+    if (!response.ok) {
+      const payload = await response.json().catch(async () => ({
+        error: (await response.text()) || "Export allegati fallito"
+      }));
+      throw new Error(payload.error || "Export allegati fallito");
+    }
+
+    const blob = await response.blob();
+    if (!blob || blob.size === 0) {
+      throw new Error("ZIP vuoto: nessun contenuto scaricato.");
+    }
+
+    const fileName = parseDownloadFileNameFromHeaders(response);
+    const blobUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = blobUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(blobUrl);
+
+    const megaBytes = (blob.size / (1024 * 1024)).toFixed(2);
+    setBulkExportProgress(100, `100% - Download pronto (${megaBytes} MB)`);
+    setBulkDownloadStatus(`Download completato: ${fileName} (${megaBytes} MB)`);
+  } catch (error) {
+    setBulkDownloadStatus(getReadableFetchError(error), true);
+  } finally {
+    stopBulkExportProgressPolling();
+    bulkDownloadAttachmentsBtnEl.disabled = false;
+  }
 }
 
 // Dashboard rendering
@@ -1071,6 +1324,7 @@ async function loadMessagesForPage(force = false) {
 
     messagesPageLoaded = true;
     populateSystemFilters();
+    populateBulkAttachmentFilters();
     if (currentPage === "messages") {
       renderMessages();
     }
@@ -1190,6 +1444,7 @@ async function refresh() {
     messagesPageLoaded = false;
 
     populateSystemFilters();
+    populateBulkAttachmentFilters();
     renderCurrentPage();
 
     if (currentPage === "messages") {
@@ -1231,6 +1486,7 @@ if (messageStatusFilterEl) messageStatusFilterEl.addEventListener("change", rend
 if (messageTimeFilterEl) messageTimeFilterEl.addEventListener("change", renderMessages);
 if (syncMessageCacheBtnEl) syncMessageCacheBtnEl.addEventListener("click", () => startMessageCacheSync(true));
 if (refreshMessageCacheStatusBtnEl) refreshMessageCacheStatusBtnEl.addEventListener("click", refreshMessageCacheStatus);
+if (bulkDownloadAttachmentsBtnEl) bulkDownloadAttachmentsBtnEl.addEventListener("click", downloadBulkAttachmentsZip);
 if (closeAttachmentViewerBtnEl) closeAttachmentViewerBtnEl.addEventListener("click", closeAttachmentViewer);
 if (clearMessageInterfaceFilterBtnEl) {
   clearMessageInterfaceFilterBtnEl.addEventListener("click", () => {

@@ -96,6 +96,71 @@
       <div id="page-messages" class="page">
         <section class="panel">
           <div class="panel-head">
+            <h2>Download massivo allegati MPL</h2>
+          </div>
+          <p class="muted compact">
+            Esporta in ZIP gli attachment dei log presenti in cache, filtrando per package o iFlow.
+          </p>
+          <div class="filter-group bulk-download-tools">
+            <input
+              id="bulk-package-filter"
+              list="bulk-package-options"
+              aria-label="Filtro package export"
+              placeholder="Package (opzionale)"
+              autocomplete="off"
+            />
+            <datalist id="bulk-package-options"></datalist>
+
+            <input
+              id="bulk-iflow-filter"
+              list="bulk-iflow-options"
+              aria-label="Filtro iFlow export"
+              placeholder="iFlow (opzionale)"
+              autocomplete="off"
+            />
+            <datalist id="bulk-iflow-options"></datalist>
+
+            <select id="bulk-status-filter" aria-label="Filtro stato export">
+              <option value="">Tutti gli stati</option>
+              <option value="SUCCESS">SUCCESS</option>
+              <option value="FAILED">FAILED</option>
+              <option value="PROCESSING">PROCESSING</option>
+            </select>
+
+            <select id="bulk-time-filter" aria-label="Filtro temporale export">
+              <option value="">Tutto il periodo</option>
+              <option value="5m">Ultimi 5 minuti</option>
+              <option value="15m">Ultimi 15 minuti</option>
+              <option value="30m">Ultimi 30 minuti</option>
+              <option value="1h">Ultima ora</option>
+              <option value="6h">Ultime 6 ore</option>
+              <option value="24h">Ultime 24 ore</option>
+              <option value="7d">Ultimi 7 giorni</option>
+              <option value="30d">Ultimi 30 giorni</option>
+            </select>
+
+            <input
+              id="bulk-limit-mpl"
+              type="number"
+              min="1"
+              step="1"
+              placeholder="Max log (default: tutti)"
+              aria-label="Limite log export"
+            />
+
+            <button id="bulk-download-attachments-btn" class="btn" type="button">Scarica ZIP allegati</button>
+          </div>
+          <div id="bulk-download-progress" class="progress-wrap hidden" aria-live="polite">
+            <div class="progress-track" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
+              <span id="bulk-download-progress-bar" class="progress-fill" style="width: 0%"></span>
+            </div>
+            <p id="bulk-download-progress-text" class="muted compact">0%</p>
+          </div>
+          <p id="bulk-download-status" class="muted compact">Nessun export avviato.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
             <h2>Messaggi</h2>
             <div class="filter-group">
               <span id="message-interface-context" class="muted compact hidden"></span>
