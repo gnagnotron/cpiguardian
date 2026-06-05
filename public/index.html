@@ -162,24 +162,38 @@
         <section class="panel">
           <div class="panel-head">
             <h2>Messaggi</h2>
-            <div class="filter-group">
+          </div>
+          <div class="message-filters">
+            <div class="message-filters-context">
               <span id="message-interface-context" class="muted compact hidden"></span>
               <button id="clear-message-interface-filter-btn" class="btn btn-compact hidden" type="button">Rimuovi filtro interfaccia</button>
+            </div>
+            <div class="message-filters-main">
               <input
                 id="message-system-filter"
+                class="message-filter-system"
                 list="message-system-options"
                 aria-label="Filtro sistema"
-                placeholder="Cerca sistema messaggi..."
+                placeholder="Sistema"
                 autocomplete="off"
               />
               <datalist id="message-system-options"></datalist>
-              <select id="message-status-filter" aria-label="Filtro stato">
+              <input
+                id="message-flow-filter"
+                class="message-filter-flow"
+                list="message-flow-options"
+                aria-label="Filtro flow"
+                placeholder="Flow"
+                autocomplete="off"
+              />
+              <datalist id="message-flow-options"></datalist>
+              <select id="message-status-filter" class="message-filter-status" aria-label="Filtro stato">
                 <option value="">Tutti gli stati</option>
                 <option value="SUCCESS">SUCCESS</option>
                 <option value="FAILED">FAILED</option>
                 <option value="PROCESSING">PROCESSING</option>
               </select>
-              <select id="message-time-filter" aria-label="Filtro intervallo temporale">
+              <select id="message-time-filter" class="message-filter-time" aria-label="Filtro intervallo temporale">
                 <option value="">Tutto il periodo</option>
                 <option value="5m">Ultimi 5 minuti</option>
                 <option value="15m">Ultimi 15 minuti</option>
@@ -190,6 +204,15 @@
                 <option value="7d">Ultimi 7 giorni</option>
                 <option value="30d">Ultimi 30 giorni</option>
               </select>
+              <div class="message-header-wrap">
+                <label for="message-header-filter" class="message-filter-label">Custom Header</label>
+                <input
+                  id="message-header-filter"
+                  aria-label="Filtro custom header"
+                  placeholder="Cerca per nome o valore (es. CIG, ordine, cliente...)"
+                  autocomplete="off"
+                />
+              </div>
             </div>
           </div>
           <div class="table-wrap">
@@ -256,6 +279,16 @@
           <div class="service-key-tools">
             <button id="sync-message-cache-btn" class="btn">Scarica log completi</button>
             <button id="refresh-message-cache-status-btn" class="btn">Aggiorna stato</button>
+          </div>
+          <div class="service-key-tools">
+            <input
+              id="sync-message-cache-limit"
+              type="number"
+              min="0"
+              step="1"
+              placeholder="Max messaggi da scaricare (0 = tutti)"
+              aria-label="Limite messaggi cache"
+            />
           </div>
           <p id="message-cache-status" class="muted compact">Stato cache non ancora caricato.</p>
         </section>

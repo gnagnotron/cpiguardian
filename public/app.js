@@ -9,8 +9,11 @@ const interfaceSystemFilterEl = document.getElementById("interface-system-filter
 const interfaceSystemOptionsEl = document.getElementById("interface-system-options");
 const messageSystemFilterEl = document.getElementById("message-system-filter");
 const messageSystemOptionsEl = document.getElementById("message-system-options");
+const messageFlowFilterEl = document.getElementById("message-flow-filter");
+const messageFlowOptionsEl = document.getElementById("message-flow-options");
 const messageStatusFilterEl = document.getElementById("message-status-filter");
 const messageTimeFilterEl = document.getElementById("message-time-filter");
+const messageHeaderFilterEl = document.getElementById("message-header-filter");
 const messageInterfaceContextEl = document.getElementById("message-interface-context");
 const clearMessageInterfaceFilterBtnEl = document.getElementById("clear-message-interface-filter-btn");
 const refreshBtnEl = document.getElementById("refresh-btn");
@@ -23,6 +26,7 @@ const configStatusEl = document.getElementById("config-status");
 const connectionStatusEl = document.getElementById("connection-status");
 const syncMessageCacheBtnEl = document.getElementById("sync-message-cache-btn");
 const refreshMessageCacheStatusBtnEl = document.getElementById("refresh-message-cache-status-btn");
+const syncMessageCacheLimitEl = document.getElementById("sync-message-cache-limit");
 const messageCacheStatusEl = document.getElementById("message-cache-status");
 const bulkPackageFilterEl = document.getElementById("bulk-package-filter");
 const bulkPackageOptionsEl = document.getElementById("bulk-package-options");
@@ -52,9 +56,11 @@ let timerId = null;
 let currentPage = "dashboard";
 let messagesPageLoaded = false;
 let isMessagesPageLoading = false;
+let messagesScopedToActiveInterface = false;
 let cacheStatusPollTimerId = null;
 let activeInterfaceMessageFilter = null;
 const attachmentsByMplId = new Map();
+const attachmentDiagnosticsByMplId = new Map();
 const attachmentsLoading = new Set();
 let bulkExportProgressPollTimerId = null;
 
@@ -133,7 +139,7 @@ function showPage(pageName) {
   }
 
   if (pageName === "messages") {
-    loadMessagesForPage();
+    loadMessagesForPage(false, activeInterfaceMessageFilter);
   }
   
   renderCurrentPage();
@@ -224,6 +230,31 @@ function formatAttachmentSize(value) {
   return `${(size / (1024 * 1024)).toFixed(1)} MB`;
 }
 
+function formatAttachmentDiagnostics(diagnostics) {
+  if (!diagnostics || typeof diagnostics !== "object") {
+    return "";
+  }
+
+  const bits = [];
+  if (Number(diagnostics.messageStoreEntriesCount || 0) > 0) {
+    bits.push(`store: ${Number(diagnostics.messageStoreEntriesCount)}`);
+  }
+
+  if (Number(diagnostics.runsCount || 0) > 1) {
+    bits.push(`runs: ${Number(diagnostics.runsCount)}`);
+  }
+
+  if (diagnostics.hasErrorInformation) {
+    bits.push("error info presente");
+  }
+
+  if (diagnostics.archivingLogAttachments === false) {
+    bits.push("archiving allegati: off");
+  }
+
+  return bits.join(" - ");
+}
+
 function formatAttachmentsCell(item) {
   const mplId = String(item.mplId || item.id || "");
   if (!mplId) {
@@ -232,7 +263,7 @@ function formatAttachmentsCell(item) {
 
   const cached = attachmentsByMplId.get(mplId);
   if (!cached) {
-    // Show action only when attachments are known; avoid misleading "Vedi allegati" on unknown rows.
+    // Keep UX explicit: known rows show attachments, otherwise allow on-demand loading.
     if (item.attachmentsLoaded === true) {
       const known = Array.isArray(item.attachments) ? item.attachments : [];
       if (known.length === 0) {
@@ -253,12 +284,22 @@ function formatAttachmentsCell(item) {
         .join("");
     }
 
-    return "";
+    if (attachmentsLoading.has(mplId)) {
+      return "<span class='muted compact'>Caricamento allegati...</span>";
+    }
+
+    return `<a href="#" class="btn btn-compact" data-action="open-attachments" data-mpl-id="${escapeHtml(mplId)}">Carica allegati</a>`;
   }
 
   const attachments = cached || [];
   if (attachments.length === 0) {
-    return "<span class='muted compact'>Nessun allegato</span>";
+    const diagnostics = attachmentDiagnosticsByMplId.get(mplId);
+    const diagLabel = formatAttachmentDiagnostics(diagnostics);
+    if (!diagLabel) {
+      return "<span class='muted compact'>Nessun allegato</span>";
+    }
+
+    return `<span class='muted compact'>Nessun allegato<br>${escapeHtml(diagLabel)}</span>`;
   }
 
   return attachments
@@ -575,6 +616,7 @@ function formatCacheStatus(meta, inProgress) {
   const lines = [
     `<span><strong>Stato:</strong> ${inProgress ? "Sincronizzazione in corso" : "Idle"}</span>`,
     `<span><strong>Messaggi in cache:</strong> ${meta.count || 0}</span>`,
+    `<span><strong>Limite cache:</strong> ${meta.maxItems || "n/d"}${meta.truncated ? " (limite raggiunto)" : ""}</span>`,
     `<span><strong>Finestra:</strong> ultimi ${meta.windowDays || 30} giorni</span>`,
     `<span><strong>Copertura sorgente:</strong> ${meta.downloadedAllAvailable ? "Completa" : "Parziale"}</span>`
   ];
@@ -593,6 +635,15 @@ function formatCacheStatus(meta, inProgress) {
 
   if (meta.pagesFetched || meta.rawFetched) {
     lines.push(`<span><strong>Progress:</strong> pagine ${meta.pagesFetched || 0}, record ${meta.rawFetched || 0}</span>`);
+  }
+
+  if (meta.targetDownloadCount) {
+    const done = Number(meta.rawFetched || 0);
+    const target = Number(meta.targetDownloadCount || 0);
+    const percent = Number(meta.progressPercent || 0);
+    lines.push(`<span><strong>Download log:</strong> ${done} / ${target} (${percent}%)</span>`);
+  } else if (meta.progressPercent !== null && meta.progressPercent !== undefined) {
+    lines.push(`<span><strong>Download log:</strong> ${Number(meta.progressPercent || 0)}%</span>`);
   }
 
   if (meta.attachmentsPrefetchEnabled) {
@@ -615,6 +666,7 @@ function formatCacheStatus(meta, inProgress) {
 function populateSystemFilters() {
   const interfaceSystems = new Set();
   const messageSystems = new Set();
+  const messageFlows = new Set();
   
   overviewCache.interfaces.forEach((item) => {
     const system = getSystemForInterface(item);
@@ -626,10 +678,16 @@ function populateSystemFilters() {
     if (system && system !== "UNKNOWN") {
       messageSystems.add(system);
     }
+
+    const flow = String(item.integrationFlow || "").trim();
+    if (flow) {
+      messageFlows.add(flow);
+    }
   });
   
   const sortedInterfaceSystems = Array.from(interfaceSystems).sort();
   const sortedMessageSystems = Array.from(messageSystems).sort();
+  const sortedMessageFlows = Array.from(messageFlows).sort((a, b) => a.localeCompare(b));
 
   const updateSystemInput = (inputEl, datalistEl, systems) => {
     if (!inputEl || !datalistEl) {
@@ -646,6 +704,7 @@ function populateSystemFilters() {
   
   updateSystemInput(interfaceSystemFilterEl, interfaceSystemOptionsEl, sortedInterfaceSystems);
   updateSystemInput(messageSystemFilterEl, messageSystemOptionsEl, sortedMessageSystems);
+  updateSystemInput(messageFlowFilterEl, messageFlowOptionsEl, sortedMessageFlows);
 }
 
 function populateBulkAttachmentFilters() {
@@ -665,6 +724,7 @@ function populateBulkAttachmentFilters() {
 
   const packageValues = new Set();
   const iflowValues = new Set();
+  const selectedPackage = String(bulkPackageFilterEl?.value || "").trim();
 
   (overviewCache.messages || []).forEach((item) => {
     const pkg = String(item.package || "").trim();
@@ -674,8 +734,22 @@ function populateBulkAttachmentFilters() {
       packageValues.add(pkg);
     }
 
-    if (iflow) {
+    if (iflow && (!selectedPackage || pkg === selectedPackage)) {
       iflowValues.add(iflow);
+    }
+  });
+
+  // Include display names from interfaces so users can filter/export by what they see in Interfacce.
+  (overviewCache.interfaces || []).forEach((item) => {
+    const ifacePackage = String(item.package || "").trim();
+    const ifaceName = String(item.name || "").trim();
+
+    if (ifacePackage && ifacePackage !== "UNKNOWN") {
+      packageValues.add(ifacePackage);
+    }
+
+    if (ifaceName && (!selectedPackage || ifacePackage === selectedPackage)) {
+      iflowValues.add(ifaceName);
     }
   });
 
@@ -991,13 +1065,19 @@ function renderMessages() {
   if (!messagesBodyEl) return;
   
   const systemFilter = (messageSystemFilterEl?.value || "").trim();
+  const flowFilter = (messageFlowFilterEl?.value || "").trim().toLowerCase();
   const statusFilter = messageStatusFilterEl?.value || "";
   const timeFilter = messageTimeFilterEl?.value || "";
+  const headerFilter = (messageHeaderFilterEl?.value || "").trim().toLowerCase();
   
-  let filtered = overviewCache.messages.filter((item) => getSystemForMessage(item) !== "UNKNOWN");
+  let filtered = overviewCache.messages.slice();
   
   if (systemFilter) {
     filtered = filtered.filter((item) => getSystemForMessage(item) === systemFilter);
+  }
+
+  if (flowFilter) {
+    filtered = filtered.filter((item) => String(item.integrationFlow || "").toLowerCase().includes(flowFilter));
   }
   
   if (statusFilter) {
@@ -1005,12 +1085,13 @@ function renderMessages() {
   }
 
   if (activeInterfaceMessageFilter) {
-    const id = String(activeInterfaceMessageFilter.id || "");
     const name = String(activeInterfaceMessageFilter.name || "");
-    filtered = filtered.filter((item) => {
-      const flow = String(item.integrationFlow || "");
-      return flow === id || flow === name;
-    });
+    if (!messagesScopedToActiveInterface) {
+      filtered = filtered.filter((item) => {
+        const flow = String(item.integrationFlow || "");
+        return flow === name;
+      });
+    }
   }
 
   if (timeFilter) {
@@ -1021,6 +1102,17 @@ function renderMessages() {
         return ts !== null && ts >= threshold;
       });
     }
+  }
+
+  if (headerFilter) {
+    filtered = filtered.filter((item) => {
+      const headers = Array.isArray(item.customHeaders) ? item.customHeaders : [];
+      return headers.some((header) => {
+        const name = String(header?.name || "").toLowerCase();
+        const value = String(header?.value || "").toLowerCase();
+        return name.includes(headerFilter) || value.includes(headerFilter);
+      });
+    });
   }
 
   if (filtered.length === 0) {
@@ -1054,7 +1146,7 @@ async function fetchMessageAttachments(mplId) {
   return response.json();
 }
 
-function showAttachmentsListInViewer(mplId, attachments) {
+function showAttachmentsListInViewer(mplId, attachments, diagnostics = null) {
   if (!attachmentViewerEl || !attachmentViewerBodyEl || !attachmentViewerMetaEl) {
     return;
   }
@@ -1063,7 +1155,11 @@ function showAttachmentsListInViewer(mplId, attachments) {
   attachmentViewerMetaEl.textContent = `MPL ${mplId} - allegati`;
 
   if (!attachments || attachments.length === 0) {
-    attachmentViewerBodyEl.innerHTML = "<p class='muted'>Nessun allegato disponibile per questo messaggio.</p>";
+    const diagLabel = formatAttachmentDiagnostics(diagnostics);
+    attachmentViewerBodyEl.innerHTML = `
+      <p class='muted'>Nessun allegato disponibile per questo messaggio.</p>
+      ${diagLabel ? `<p class='muted compact'>Diagnostica MPL: ${escapeHtml(diagLabel)}</p>` : ""}
+    `;
     return;
   }
 
@@ -1099,6 +1195,18 @@ function updateMessageAttachmentsInCache(mplId, attachments) {
   patch(overviewCache.messages || []);
 }
 
+function updateMessageAttachmentDiagnosticsInCache(mplId, diagnostics) {
+  if (!mplId || !diagnostics) {
+    return;
+  }
+
+  (overviewCache.messages || []).forEach((msg) => {
+    if (String(msg.mplId || msg.id || "") === String(mplId)) {
+      msg.attachmentsDiagnostics = diagnostics;
+    }
+  });
+}
+
 async function loadAttachmentsForMessage(mplId, silent = false) {
   if (!mplId || attachmentsLoading.has(mplId)) {
     return;
@@ -1110,7 +1218,12 @@ async function loadAttachmentsForMessage(mplId, silent = false) {
   try {
     const data = await fetchMessageAttachments(mplId);
     const items = Array.isArray(data.items) ? data.items : [];
+    const diagnostics = data.diagnostics && typeof data.diagnostics === "object" ? data.diagnostics : null;
     attachmentsByMplId.set(mplId, items);
+    if (diagnostics) {
+      attachmentDiagnosticsByMplId.set(mplId, diagnostics);
+      updateMessageAttachmentDiagnosticsInCache(mplId, diagnostics);
+    }
     updateMessageAttachmentsInCache(mplId, items);
     return items;
   } catch (error) {
@@ -1132,15 +1245,17 @@ async function openAttachmentsForMessage(mplId) {
   openAttachmentViewerLoading(`MPL ${mplId}`);
 
   try {
-    const attachments = attachmentsByMplId.has(mplId)
+    const hasCachedAttachments = attachmentsByMplId.has(mplId);
+    const attachments = hasCachedAttachments
       ? attachmentsByMplId.get(mplId)
       : await loadAttachmentsForMessage(mplId, true);
+    const diagnostics = attachmentDiagnosticsByMplId.get(mplId) || null;
 
     if (Array.isArray(attachments) && attachments.length === 1 && attachments[0].downloadUrl) {
       return openAttachmentViewer(attachments[0].downloadUrl, attachments[0].name || "allegato");
     }
 
-    showAttachmentsListInViewer(mplId, attachments || []);
+    showAttachmentsListInViewer(mplId, attachments || [], diagnostics);
   } catch (error) {
     if (!attachmentViewerBodyEl || !attachmentViewerMetaEl || !attachmentViewerEl) {
       return;
@@ -1214,8 +1329,22 @@ async function fetchOverview() {
   return response.json();
 }
 
-async function fetchMessages(top = 2000) {
-  const response = await fetch(`/api/cpi/messages?top=${encodeURIComponent(top)}`);
+async function fetchMessages(top = 2000, options = {}) {
+  const query = new URLSearchParams();
+  query.set("top", String(top));
+
+  const interfaceName = String(options.interfaceName || "").trim();
+  const timeRange = String(options.timeRange || "").trim();
+
+  if (interfaceName) {
+    query.set("interfaceName", interfaceName);
+  }
+
+  if (timeRange) {
+    query.set("timeRange", timeRange);
+  }
+
+  const response = await fetch(`/api/cpi/messages?${query.toString()}`);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.error || "Errore nel caricamento messaggi");
@@ -1235,8 +1364,13 @@ async function fetchMessageCacheStatus() {
 }
 
 async function fetchCachedMessages(limit = 0) {
-  const query = limit > 0 ? `?limit=${encodeURIComponent(limit)}` : "";
-  const response = await fetch(`/api/cache/messages${query}`);
+  const query = new URLSearchParams();
+  if (limit > 0) {
+    query.set("limit", String(limit));
+  }
+  query.set("includeUnknown", "true");
+  const suffix = query.toString();
+  const response = await fetch(`/api/cache/messages${suffix ? `?${suffix}` : ""}`);
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.error || "Errore nel caricamento messaggi da cache");
@@ -1285,12 +1419,19 @@ async function startMessageCacheSync(force = true) {
   setMessageCacheStatus("Sincronizzazione cache in avvio...");
 
   try {
+    const limitRaw = String(syncMessageCacheLimitEl?.value || "").trim();
+    const limitValue = Number(limitRaw);
+    const hasLimit = limitRaw !== "" && !Number.isNaN(limitValue) && limitValue > 0;
+
     const response = await fetch(`/api/cache/messages/sync?force=${force ? "true" : "false"}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json"
       },
-      body: JSON.stringify({ force })
+      body: JSON.stringify({
+        force,
+        ...(hasLimit ? { maxItems: Math.floor(limitValue) } : {})
+      })
     });
 
     const payload = await response.json().catch(() => ({}));
@@ -1307,19 +1448,31 @@ async function startMessageCacheSync(force = true) {
   }
 }
 
-async function loadMessagesForPage(force = false) {
-  if (isMessagesPageLoading || (messagesPageLoaded && !force)) {
+async function loadMessagesForPage(force = false, interfaceFilter = null) {
+  const hasInterfaceFilter = Boolean(interfaceFilter?.id || interfaceFilter?.name);
+  if (isMessagesPageLoading || (messagesPageLoaded && !force && !hasInterfaceFilter)) {
     return;
   }
 
   isMessagesPageLoading = true;
   try {
-    const cached = await fetchCachedMessages(3000);
-    if (Array.isArray(cached.items) && cached.items.length > 0) {
-      overviewCache.messages = cached.items;
-    } else {
-      const live = await fetchMessages(2000);
+    if (hasInterfaceFilter) {
+      const activeTimeRange = String(messageTimeFilterEl?.value || "").trim();
+      const live = await fetchMessages(3000, {
+        interfaceName: interfaceFilter.name || "",
+        timeRange: activeTimeRange
+      });
       overviewCache.messages = live.items || [];
+      messagesScopedToActiveInterface = true;
+    } else {
+      const cached = await fetchCachedMessages(0);
+      if (Array.isArray(cached.items) && cached.items.length > 0) {
+        overviewCache.messages = cached.items;
+      } else {
+        const live = await fetchMessages(2000);
+        overviewCache.messages = live.items || [];
+      }
+      messagesScopedToActiveInterface = false;
     }
 
     messagesPageLoaded = true;
@@ -1336,20 +1489,35 @@ async function loadMessagesForPage(force = false) {
 }
 
 function openMessagesForInterface(interfaceId, interfaceName) {
-  const id = String(interfaceId || "").trim();
   const name = String(interfaceName || "").trim();
-  if (!id && !name) {
+  if (!name) {
     return;
   }
 
   setActiveInterfaceMessageFilter({
-    id,
+    id: "",
     name,
-    label: name || id
+    label: name
   });
 
+  if (messageSystemFilterEl) {
+    messageSystemFilterEl.value = "";
+  }
+
+  if (messageFlowFilterEl) {
+    messageFlowFilterEl.value = "";
+  }
+
+  if (messageStatusFilterEl) {
+    messageStatusFilterEl.value = "";
+  }
+
+  if (messageTimeFilterEl) {
+    messageTimeFilterEl.value = "7d";
+  }
+
   showPage("messages");
-  renderMessages();
+  loadMessagesForPage(true, { name });
 }
 
 async function loadConfigStatus() {
@@ -1482,16 +1650,26 @@ if (interfaceSystemFilterEl) interfaceSystemFilterEl.addEventListener("change", 
 if (interfaceSystemFilterEl) interfaceSystemFilterEl.addEventListener("input", renderInterfaces);
 if (messageSystemFilterEl) messageSystemFilterEl.addEventListener("change", renderMessages);
 if (messageSystemFilterEl) messageSystemFilterEl.addEventListener("input", renderMessages);
+if (messageFlowFilterEl) messageFlowFilterEl.addEventListener("change", renderMessages);
+if (messageFlowFilterEl) messageFlowFilterEl.addEventListener("input", renderMessages);
 if (messageStatusFilterEl) messageStatusFilterEl.addEventListener("change", renderMessages);
 if (messageTimeFilterEl) messageTimeFilterEl.addEventListener("change", renderMessages);
+if (messageHeaderFilterEl) {
+  messageHeaderFilterEl.addEventListener("change", renderMessages);
+  messageHeaderFilterEl.addEventListener("input", renderMessages);
+}
 if (syncMessageCacheBtnEl) syncMessageCacheBtnEl.addEventListener("click", () => startMessageCacheSync(true));
 if (refreshMessageCacheStatusBtnEl) refreshMessageCacheStatusBtnEl.addEventListener("click", refreshMessageCacheStatus);
 if (bulkDownloadAttachmentsBtnEl) bulkDownloadAttachmentsBtnEl.addEventListener("click", downloadBulkAttachmentsZip);
+if (bulkPackageFilterEl) {
+  bulkPackageFilterEl.addEventListener("change", populateBulkAttachmentFilters);
+  bulkPackageFilterEl.addEventListener("input", populateBulkAttachmentFilters);
+}
 if (closeAttachmentViewerBtnEl) closeAttachmentViewerBtnEl.addEventListener("click", closeAttachmentViewer);
 if (clearMessageInterfaceFilterBtnEl) {
   clearMessageInterfaceFilterBtnEl.addEventListener("click", () => {
     setActiveInterfaceMessageFilter(null);
-    renderMessages();
+    loadMessagesForPage(true);
   });
 }
 if (attachmentViewerEl) {

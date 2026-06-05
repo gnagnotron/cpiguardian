@@ -28,8 +28,8 @@ const port = Number(process.env.PORT || 3000);
 const messagesTop = Number(process.env.CPI_MESSAGES_TOP || 100);
 const cacheWindowDays = Number(process.env.CPI_CACHE_WINDOW_DAYS || 30);
 const cachePageSize = Number(process.env.CPI_CACHE_PAGE_SIZE || 500);
-const cacheMaxPages = Number(process.env.CPI_CACHE_MAX_PAGES || 200);
-const cacheMaxItems = Number(process.env.CPI_CACHE_MAX_ITEMS || 15000);
+const cacheMaxPages = Number(process.env.CPI_CACHE_MAX_PAGES || 0);
+const cacheMaxItems = Number(process.env.CPI_CACHE_MAX_ITEMS || 0);
 const cacheApiDefaultLimit = Number(process.env.CPI_CACHE_API_DEFAULT_LIMIT || 3000);
 const preloadAttachmentsEnabled = String(process.env.CPI_PRELOAD_ATTACHMENTS || "false").toLowerCase() === "true";
 const attachmentPrefetchLimit = Number(process.env.CPI_ATTACHMENT_PREFETCH_LIMIT || 1500);
@@ -58,6 +58,12 @@ const interfacePackageLookupCache = {
   inFlight: null
 };
 
+function resetInterfacePackageLookupCache() {
+  interfacePackageLookupCache.lookup = new Map();
+  interfacePackageLookupCache.expiresAt = 0;
+  interfacePackageLookupCache.inFlight = null;
+}
+
 const attachmentExportProgress = new Map();
 
 const messageCacheState = {
@@ -80,6 +86,10 @@ const messageCacheState = {
     attachmentsWithItems: 0,
     attachmentsFullyScanned: false,
     maxItems: cacheMaxItems,
+    requestedMaxItems: cacheMaxItems,
+    estimatedTotalAvailable: null,
+    targetDownloadCount: null,
+    progressPercent: null,
     truncated: false,
     sourceBaseUrl: null
   },
@@ -172,6 +182,10 @@ function resetMessageCache(sourceBaseUrl = null) {
   messageCacheState.meta.attachmentsProcessed = 0;
   messageCacheState.meta.attachmentsWithItems = 0;
   messageCacheState.meta.attachmentsFullyScanned = false;
+  messageCacheState.meta.requestedMaxItems = cacheMaxItems;
+  messageCacheState.meta.estimatedTotalAvailable = null;
+  messageCacheState.meta.targetDownloadCount = null;
+  messageCacheState.meta.progressPercent = null;
   messageCacheState.meta.truncated = false;
   messageCacheState.meta.sourceBaseUrl = sourceBaseUrl;
 }
@@ -233,7 +247,7 @@ function loadCacheFromDisk() {
   }
 }
 
-async function syncMessagesCache({ force = false } = {}) {
+async function syncMessagesCache({ force = false, maxItemsOverride = null } = {}) {
   if (messageCacheState.sync.inProgress) {
     return false;
   }
@@ -249,6 +263,13 @@ async function syncMessagesCache({ force = false } = {}) {
     }
   }
 
+  const safeConfiguredMaxItems = Number.isNaN(cacheMaxItems) || cacheMaxItems <= 0 ? Number.MAX_SAFE_INTEGER : cacheMaxItems;
+  const safeOverrideMaxItems =
+    Number.isNaN(Number(maxItemsOverride)) || Number(maxItemsOverride) <= 0
+      ? Number.MAX_SAFE_INTEGER
+      : Math.min(Number(maxItemsOverride), Number.MAX_SAFE_INTEGER);
+  const safeMaxItems = Math.min(safeConfiguredMaxItems, safeOverrideMaxItems);
+
   messageCacheState.sync.inProgress = true;
   messageCacheState.meta.sourceBaseUrl = normalizeBaseUrl(runtimeConfig.baseUrl || "") || null;
   messageCacheState.meta.lastSyncStartedAt = new Date(now).toISOString();
@@ -259,9 +280,13 @@ async function syncMessagesCache({ force = false } = {}) {
   messageCacheState.meta.attachmentsProcessed = 0;
   messageCacheState.meta.attachmentsWithItems = 0;
   messageCacheState.meta.attachmentsFullyScanned = false;
+  messageCacheState.meta.requestedMaxItems = Number.isFinite(safeMaxItems) ? safeMaxItems : cacheMaxItems;
+  messageCacheState.meta.estimatedTotalAvailable = null;
+  messageCacheState.meta.targetDownloadCount = null;
+  messageCacheState.meta.progressPercent = 0;
 
   try {
-    const safeMaxItems = Number.isNaN(cacheMaxItems) || cacheMaxItems <= 0 ? Number.MAX_SAFE_INTEGER : cacheMaxItems;
+    const safeMaxPages = Number.isNaN(cacheMaxPages) || cacheMaxPages <= 0 ? Number.MAX_SAFE_INTEGER : cacheMaxPages;
     const interfacesPayload = await cpiGet("api/v1/IntegrationRuntimeArtifacts", {
       $format: "json"
     });
@@ -275,14 +300,27 @@ async function syncMessagesCache({ force = false } = {}) {
     let downloadedAllAvailable = false;
     let stoppedByMaxItems = false;
 
-    while (pagesFetched < cacheMaxPages) {
+    while (pagesFetched < safeMaxPages) {
       const payload = await cpiGet("api/v1/MessageProcessingLogs", {
         $format: "json",
         $orderby: "LogEnd desc",
         $expand: "CustomHeaderProperties",
         $top: cachePageSize,
-        $skip: skip
+        $skip: skip,
+        ...(pagesFetched === 0 ? { $inlinecount: "allpages" } : {})
       });
+
+      if (pagesFetched === 0) {
+        const inlineCountRaw = payload?.d?.__count ?? payload?.__count;
+        const inlineCount = Number(inlineCountRaw);
+        if (!Number.isNaN(inlineCount) && inlineCount >= 0) {
+          messageCacheState.meta.estimatedTotalAvailable = inlineCount;
+          messageCacheState.meta.targetDownloadCount = Math.min(inlineCount, safeMaxItems);
+        } else {
+          messageCacheState.meta.estimatedTotalAvailable = null;
+          messageCacheState.meta.targetDownloadCount = Number.isFinite(safeMaxItems) ? safeMaxItems : null;
+        }
+      }
 
       const rawItems = normalizeCpiCollection(payload);
       if (rawItems.length === 0) {
@@ -307,6 +345,14 @@ async function syncMessagesCache({ force = false } = {}) {
       rawFetched += rawItems.length;
       messageCacheState.meta.pagesFetched = pagesFetched;
       messageCacheState.meta.rawFetched = rawFetched;
+      if (messageCacheState.meta.targetDownloadCount && messageCacheState.meta.targetDownloadCount > 0) {
+        messageCacheState.meta.progressPercent = Math.min(
+          100,
+          Math.round((rawFetched / messageCacheState.meta.targetDownloadCount) * 100)
+        );
+      } else {
+        messageCacheState.meta.progressPercent = null;
+      }
 
       const oldestInPageTs = mappedItems.reduce((min, item) => {
         const ts = getMessageLogTimestamp(item);
@@ -381,6 +427,7 @@ async function syncMessagesCache({ force = false } = {}) {
     messageCacheState.meta.downloadedAllAvailable = downloadedAllAvailable;
     messageCacheState.meta.lastSyncCompletedAt = new Date().toISOString();
     refreshCacheTimeBounds();
+    messageCacheState.meta.progressPercent = 100;
     saveCacheToDisk();
   } catch (error) {
     messageCacheState.meta.lastSyncError = error.message;
@@ -752,6 +799,15 @@ async function getInterfacePackageLookup() {
 
 function buildRuntimePackageLookup(interfaces) {
   const lookup = new Map();
+  const setLookup = (key, packageName) => {
+    const normalized = String(key || "").trim();
+    if (!normalized) {
+      return;
+    }
+
+    lookup.set(normalized, packageName);
+    lookup.set(normalized.toLowerCase(), packageName);
+  };
 
   interfaces.forEach((item) => {
     const packageName = item.package;
@@ -759,13 +815,8 @@ function buildRuntimePackageLookup(interfaces) {
       return;
     }
 
-    if (item.id) {
-      lookup.set(String(item.id), packageName);
-    }
-
-    if (item.name) {
-      lookup.set(String(item.name), packageName);
-    }
+    setLookup(item.id, packageName);
+    setLookup(item.name, packageName);
   });
 
   return lookup;
@@ -800,6 +851,27 @@ function sanitizeZipSegment(value, fallback = "unknown") {
     .slice(0, 80);
 
   return cleaned || fallback;
+}
+
+function formatZipTimestampFromMessage(message) {
+  const ts = getMessageLogTimestamp(message);
+  if (ts === null) {
+    return "no-ts";
+  }
+
+  const date = new Date(ts);
+  if (Number.isNaN(date.getTime())) {
+    return "no-ts";
+  }
+
+  const yyyy = String(date.getUTCFullYear());
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  const hh = String(date.getUTCHours()).padStart(2, "0");
+  const mi = String(date.getUTCMinutes()).padStart(2, "0");
+  const ss = String(date.getUTCSeconds()).padStart(2, "0");
+
+  return `${yyyy}${mm}${dd}_${hh}${mi}${ss}Z`;
 }
 
 function parseAttachmentUriFromDownloadUrl(downloadUrl) {
@@ -907,6 +979,100 @@ async function fetchAttachmentsForMplWithFallback(mplIdOrGuid) {
   }
 }
 
+function countCpiCollection(payload) {
+  return normalizeCpiCollection(payload).length;
+}
+
+function hasNonEmptyCpiEntity(payload) {
+  if (!payload) {
+    return false;
+  }
+
+  const root = payload.d && typeof payload.d === "object" ? payload.d : payload;
+  if (!root || typeof root !== "object") {
+    return false;
+  }
+
+  const keys = Object.keys(root).filter((key) => key !== "__metadata" && key !== "results");
+  return keys.some((key) => {
+    const value = root[key];
+    if (value === null || value === undefined) {
+      return false;
+    }
+
+    if (typeof value === "string") {
+      return value.trim().length > 0;
+    }
+
+    if (typeof value === "number" || typeof value === "boolean") {
+      return true;
+    }
+
+    if (Array.isArray(value)) {
+      return value.length > 0;
+    }
+
+    if (typeof value === "object") {
+      return Object.keys(value).length > 0;
+    }
+
+    return false;
+  });
+}
+
+async function fetchMplDiagnostics(mplId) {
+  const safeMplId = String(mplId || "").trim().replace(/'/g, "''");
+  if (!safeMplId) {
+    return null;
+  }
+
+  const diagnostics = {
+    status: null,
+    integrationFlow: null,
+    package: null,
+    archivingLogAttachments: null,
+    messageStoreEntriesCount: 0,
+    runsCount: 0,
+    hasErrorInformation: false
+  };
+
+  try {
+    const logPayload = await cpiGet(`api/v1/MessageProcessingLogs('${safeMplId}')`, {
+      $format: "json"
+    });
+
+    const logRoot = logPayload?.d || logPayload || {};
+    diagnostics.status = logRoot.Status || logRoot.CustomStatus || null;
+    diagnostics.integrationFlow = logRoot.IntegrationFlowName || null;
+    diagnostics.package =
+      logRoot?.IntegrationArtifact?.PackageName ||
+      logRoot?.IntegrationArtifact?.PackageId ||
+      null;
+    diagnostics.archivingLogAttachments =
+      typeof logRoot.ArchivingLogAttachments === "boolean" ? logRoot.ArchivingLogAttachments : null;
+  } catch (_error) {
+    // If this lookup fails we still return any counts we can collect below.
+  }
+
+  const [storePayload, runsPayload, errorPayload] = await Promise.all([
+    cpiGet(`api/v1/MessageProcessingLogs('${safeMplId}')/MessageStoreEntries`, {
+      $format: "json"
+    }).catch(() => null),
+    cpiGet(`api/v1/MessageProcessingLogs('${safeMplId}')/Runs`, {
+      $format: "json"
+    }).catch(() => null),
+    cpiGet(`api/v1/MessageProcessingLogs('${safeMplId}')/ErrorInformation`, {
+      $format: "json"
+    }).catch(() => null)
+  ]);
+
+  diagnostics.messageStoreEntriesCount = countCpiCollection(storePayload);
+  diagnostics.runsCount = countCpiCollection(runsPayload);
+  diagnostics.hasErrorInformation = countCpiCollection(errorPayload) > 0 || hasNonEmptyCpiEntity(errorPayload);
+
+  return diagnostics;
+}
+
 function mapMessages(items, runtimePackageLookup = new Map()) {
   return items.map((item) => {
     const artifact = item.IntegrationArtifact || {};
@@ -920,15 +1086,46 @@ function mapMessages(items, runtimePackageLookup = new Map()) {
       : [];
 
     const flowName =
+      artifact.Name ||
       item.IntegrationFlowName ||
       artifact.Id ||
-      artifact.Name ||
       item.ApplicationMessageId ||
       "N/D";
 
-    let packageValue = artifact.PackageName || artifact.PackageId || item.Package;
-    if ((!packageValue || packageValue === "UNKNOWN") && flowName && runtimePackageLookup.has(flowName)) {
-      packageValue = runtimePackageLookup.get(flowName);
+    let packageValue =
+      artifact.PackageName ||
+      artifact.PackageId ||
+      item.Package ||
+      item.IntegrationPackageName ||
+      item.IntegrationPackageId;
+
+    if (!packageValue || packageValue === "UNKNOWN") {
+      const lookupCandidates = [
+        flowName,
+        item.IntegrationFlowName,
+        artifact.Id,
+        artifact.Name,
+        item.IntegrationArtifactId,
+        item.IntegrationArtifactName
+      ];
+
+      for (const candidate of lookupCandidates) {
+        const key = String(candidate || "").trim();
+        if (!key) {
+          continue;
+        }
+
+        if (runtimePackageLookup.has(key)) {
+          packageValue = runtimePackageLookup.get(key);
+          break;
+        }
+
+        const lowered = key.toLowerCase();
+        if (runtimePackageLookup.has(lowered)) {
+          packageValue = runtimePackageLookup.get(lowered);
+          break;
+        }
+      }
     }
 
     const logObjectId = item.Id || item.MessageGuid || "n/a";
@@ -1022,6 +1219,8 @@ app.post("/api/config/service-key", (req, res) => {
       expiresAt: 0
     };
 
+    resetInterfacePackageLookupCache();
+
     if (previousBaseUrl !== runtimeConfig.baseUrl) {
       resetMessageCache(runtimeConfig.baseUrl || null);
       saveCacheToDisk();
@@ -1070,27 +1269,118 @@ app.get("/api/cpi/messages", async (req, res) => {
   try {
     const top = Number(req.query.top || messagesTop);
     const statusFilter = (req.query.status || "").toString().trim().toUpperCase();
+    const interfaceNameFilter = (req.query.interfaceName || "").toString().trim();
+    const interfaceIdFilter = (req.query.interfaceId || "").toString().trim();
+    const timeRangeFilter = (req.query.timeRange || "").toString().trim();
+    const safeTop = Number.isNaN(top) ? messagesTop : Math.max(1, Math.min(top, 5000));
+    const timeThreshold = getTimeThresholdMs(timeRangeFilter);
 
-    const [messagesPayload, interfacesPayload, packageLookup] = await Promise.all([
+    const fetchMessagePayload = ({ topValue = safeTop, skipValue = 0, filterExpr = "" } = {}) =>
       cpiGet("api/v1/MessageProcessingLogs", {
         $format: "json",
         $orderby: "LogEnd desc",
         $expand: "CustomHeaderProperties",
-        $top: Number.isNaN(top) ? messagesTop : top
-      }),
+        $top: topValue,
+        $skip: skipValue,
+        ...(filterExpr ? { $filter: filterExpr } : {})
+      });
+
+    const [interfacesPayload, packageLookup] = await Promise.all([
       cpiGet("api/v1/IntegrationRuntimeArtifacts", {
         $format: "json"
       }),
       getInterfacePackageLookup()
     ]);
 
+    let rawMessageItems = [];
+    if (interfaceNameFilter || interfaceIdFilter) {
+      const normalizedDisplayName = String(interfaceNameFilter || "").trim().toLowerCase();
+      const aliases = new Map();
+      const addAlias = (value) => {
+        const raw = String(value || "").trim();
+        if (!raw) {
+          return;
+        }
+
+        const key = raw.toLowerCase();
+        if (!aliases.has(key)) {
+          aliases.set(key, raw);
+        }
+      };
+
+      if (normalizedDisplayName) {
+        interfacesPayload
+          && normalizeCpiCollection(interfacesPayload)
+            .map((item) => mapInterfaces([item], packageLookup)[0])
+            .filter(Boolean)
+            .forEach((row) => {
+              const rowName = String(row.name || "").trim().toLowerCase();
+              if (rowName === normalizedDisplayName) {
+                addAlias(row.name);
+                addAlias(row.id);
+              }
+            });
+      }
+
+      if (aliases.size === 0) {
+        [interfaceNameFilter, interfaceIdFilter]
+          .forEach((value) => addAlias(value));
+      }
+
+      const escapedAliases = Array.from(aliases.values())
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .map((value) => value.replace(/'/g, "''"));
+
+      const interfaceExprParts = [];
+      escapedAliases.forEach((value) => {
+        interfaceExprParts.push(`IntegrationArtifact/Id eq '${value}'`);
+        interfaceExprParts.push(`IntegrationArtifact/Name eq '${value}'`);
+        interfaceExprParts.push(`IntegrationFlowName eq '${value}'`);
+      });
+
+      let combinedFilterExpr = interfaceExprParts.length > 0 ? `(${interfaceExprParts.join(" or ")})` : "";
+      if (timeThreshold !== null) {
+        const iso = new Date(timeThreshold).toISOString().replace(/\.\d{3}Z$/, "");
+        const timeExpr = `LogStart ge datetime'${iso}'`;
+        combinedFilterExpr = combinedFilterExpr ? `${combinedFilterExpr} and ${timeExpr}` : timeExpr;
+      }
+
+      const payload = await fetchMessagePayload({
+        topValue: safeTop,
+        skipValue: 0,
+        filterExpr: combinedFilterExpr
+      });
+      rawMessageItems = normalizeCpiCollection(payload);
+    } else {
+      let baseFilterExpr = "";
+      if (timeThreshold !== null) {
+        const iso = new Date(timeThreshold).toISOString().replace(/\.\d{3}Z$/, "");
+        baseFilterExpr = `LogStart ge datetime'${iso}'`;
+      }
+
+      const messagesPayload = await fetchMessagePayload({ topValue: safeTop, skipValue: 0, filterExpr: baseFilterExpr });
+      rawMessageItems = normalizeCpiCollection(messagesPayload);
+    }
+
     const interfaces = mapInterfaces(normalizeCpiCollection(interfacesPayload), packageLookup);
     const runtimePackageLookup = buildRuntimePackageLookup(interfaces);
 
-    let messages = mapMessages(normalizeCpiCollection(messagesPayload), runtimePackageLookup);
+    let messages = mapMessages(rawMessageItems, runtimePackageLookup);
+    messages.sort((a, b) => (getMessageLogTimestamp(b) || 0) - (getMessageLogTimestamp(a) || 0));
+    if (messages.length > safeTop) {
+      messages = messages.slice(0, safeTop);
+    }
 
     if (statusFilter) {
       messages = messages.filter((msg) => msg.status === statusFilter);
+    }
+
+    if (timeThreshold !== null) {
+      messages = messages.filter((msg) => {
+        const ts = getMessageLogTimestamp(msg);
+        return ts !== null && ts >= timeThreshold;
+      });
     }
 
     res.json({
@@ -1113,13 +1403,15 @@ app.get("/api/cpi/messages/:mplId/attachments", async (req, res) => {
 
     const resolved = await fetchAttachmentsForMplWithFallback(mplId);
     const attachments = resolved.items;
+    const diagnostics = await fetchMplDiagnostics(resolved.resolvedId || mplId);
 
     return res.json({
       ok: true,
       mplId,
       resolvedMplId: resolved.resolvedId,
       count: attachments.length,
-      items: attachments
+      items: attachments,
+      diagnostics
     });
   } catch (error) {
     return res.status(500).json({ error: error.message });
@@ -1223,6 +1515,7 @@ app.get("/api/cpi/attachments/export.zip", async (req, res) => {
   const iflowFilter = String(req.query.iflow || "").trim();
   const statusFilter = String(req.query.status || "").trim().toUpperCase();
   const timeRangeFilter = String(req.query.timeRange || "").trim();
+  const timeThreshold = getTimeThresholdMs(timeRangeFilter);
   const progressId = String(req.query.progressId || "").trim();
   const includeUnknown = String(req.query.includeUnknown || "false").toLowerCase() === "true";
 
@@ -1257,19 +1550,90 @@ app.get("/api/cpi/attachments/export.zip", async (req, res) => {
     sourceMessages = sourceMessages.filter((item) => item.package && item.package !== "UNKNOWN");
   }
 
-  if (packageFilter) {
-    sourceMessages = sourceMessages.filter((item) => String(item.package || "") === packageFilter);
+  if (iflowFilter) {
+    try {
+      const [interfacesPayload, packageLookup] = await Promise.all([
+        cpiGet("api/v1/IntegrationRuntimeArtifacts", {
+          $format: "json"
+        }),
+        getInterfacePackageLookup()
+      ]);
+
+      const interfaces = mapInterfaces(normalizeCpiCollection(interfacesPayload), packageLookup);
+      const runtimePackageLookup = buildRuntimePackageLookup(interfaces);
+      const normalizedFilter = iflowFilter.toLowerCase();
+
+      const aliasValues = new Set();
+      interfaces.forEach((item) => {
+        const name = String(item.name || "").trim();
+        const id = String(item.id || "").trim();
+        if (!name && !id) {
+          return;
+        }
+
+        if (name.toLowerCase() === normalizedFilter || id.toLowerCase() === normalizedFilter) {
+          if (name) {
+            aliasValues.add(name);
+          }
+
+          if (id) {
+            aliasValues.add(id);
+          }
+        }
+      });
+
+      if (aliasValues.size === 0) {
+        aliasValues.add(iflowFilter);
+      }
+
+      const escapedAliases = Array.from(aliasValues)
+        .map((value) => String(value || "").trim())
+        .filter(Boolean)
+        .map((value) => value.replace(/'/g, "''"));
+
+      const flowExprParts = [];
+      escapedAliases.forEach((value) => {
+        flowExprParts.push(`IntegrationArtifact/Id eq '${value}'`);
+        flowExprParts.push(`IntegrationArtifact/Name eq '${value}'`);
+        flowExprParts.push(`IntegrationFlowName eq '${value}'`);
+      });
+
+      let combinedFilter = flowExprParts.length > 0 ? `(${flowExprParts.join(" or ")})` : "";
+      if (timeThreshold !== null) {
+        const iso = new Date(timeThreshold).toISOString().replace(/\.\d{3}Z$/, "");
+        const timeExpr = `LogStart ge datetime'${iso}'`;
+        combinedFilter = combinedFilter ? `${combinedFilter} and ${timeExpr}` : timeExpr;
+      }
+
+      const liveTop = Math.min(safeLimitMpl, 5000);
+      const livePayload = await cpiGet("api/v1/MessageProcessingLogs", {
+        $format: "json",
+        $orderby: "LogEnd desc",
+        $expand: "CustomHeaderProperties",
+        $top: liveTop,
+        ...(combinedFilter ? { $filter: combinedFilter } : {})
+      });
+
+      const liveMessages = mapMessages(normalizeCpiCollection(livePayload), runtimePackageLookup);
+      const allowedAliases = new Set(Array.from(aliasValues).map((value) => String(value).toLowerCase()));
+
+      sourceMessages = liveMessages.filter((item) => {
+        const flow = String(item.integrationFlow || "").toLowerCase();
+        return flow && allowedAliases.has(flow);
+      });
+    } catch (_error) {
+      // Keep cache-based fallback if live query fails.
+    }
   }
 
-  if (iflowFilter) {
-    sourceMessages = sourceMessages.filter((item) => String(item.integrationFlow || "") === iflowFilter);
+  if (packageFilter) {
+    sourceMessages = sourceMessages.filter((item) => String(item.package || "") === packageFilter);
   }
 
   if (statusFilter) {
     sourceMessages = sourceMessages.filter((item) => String(item.status || "").toUpperCase() === statusFilter);
   }
 
-  const timeThreshold = getTimeThresholdMs(timeRangeFilter);
   if (timeThreshold !== null) {
     sourceMessages = sourceMessages.filter((item) => {
       const ts = getMessageLogTimestamp(item);
@@ -1335,7 +1699,8 @@ app.get("/api/cpi/attachments/export.zip", async (req, res) => {
     }
     const packageName = sanitizeZipSegment(message.package || "UNKNOWN", "UNKNOWN");
     const flowName = sanitizeZipSegment(message.integrationFlow || "iflow", "iflow");
-    const mplFolder = sanitizeZipSegment(mplId, "mpl");
+    const mplTimestamp = formatZipTimestampFromMessage(message);
+    const mplFolder = sanitizeZipSegment(`${mplTimestamp}_${mplId}`, "mpl");
 
     let attachments = [];
     try {
@@ -1497,6 +1862,12 @@ app.get("/api/cache/messages/status", (_req, res) => {
 
 app.post("/api/cache/messages/sync", async (req, res) => {
   const force = Boolean(req.body?.force) || String(req.query.force || "").toLowerCase() === "true";
+  const requestedMaxItemsRaw = req.body?.maxItems ?? req.query.maxItems;
+  const requestedMaxItems = Number(requestedMaxItemsRaw);
+  const maxItemsOverride =
+    Number.isNaN(requestedMaxItems) || requestedMaxItems <= 0
+      ? null
+      : Math.min(requestedMaxItems, Number.MAX_SAFE_INTEGER);
 
   if (messageCacheState.sync.inProgress) {
     return res.status(409).json({
@@ -1505,7 +1876,7 @@ app.post("/api/cache/messages/sync", async (req, res) => {
     });
   }
 
-  syncMessagesCache({ force }).catch((error) => {
+  syncMessagesCache({ force, maxItemsOverride }).catch((error) => {
     messageCacheState.meta.lastSyncError = error.message;
     messageCacheState.sync.inProgress = false;
   });
@@ -1520,7 +1891,8 @@ app.get("/api/cache/messages", (req, res) => {
   const statusFilter = String(req.query.status || "").trim().toUpperCase();
   const systemFilter = String(req.query.system || "").trim();
   const includeUnknown = String(req.query.includeUnknown || "false").toLowerCase() === "true";
-  const requestedLimit = Number(req.query.limit || cacheApiDefaultLimit);
+  const hasLimitParam = Object.prototype.hasOwnProperty.call(req.query || {}, "limit");
+  const requestedLimit = hasLimitParam ? Number(req.query.limit) : cacheApiDefaultLimit;
 
   let items = messageCacheState.items.slice();
 

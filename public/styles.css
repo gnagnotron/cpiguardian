@@ -76,6 +76,65 @@ a:focus-visible {
   }
 }
 
+.message-filters {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.message-filters-context {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-height: 34px;
+}
+
+.message-filter-flow {
+  grid-area: flow;
+}
+
+.message-filters-main {
+  display: grid;
+  grid-template-columns: minmax(170px, 1fr) minmax(170px, 1fr) 170px 190px;
+  grid-template-areas:
+    "system flow status time"
+    "header header header header";
+  gap: 8px;
+  align-items: stretch;
+}
+
+.message-filter-system {
+  grid-area: system;
+}
+
+.message-filter-status {
+  grid-area: status;
+}
+
+.message-filter-time {
+  grid-area: time;
+}
+
+.message-header-wrap {
+  grid-area: header;
+  display: grid;
+  gap: 4px;
+}
+
+.message-filter-label {
+  font-size: 0.75rem;
+  letter-spacing: 0.03em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.message-filters-main input,
+.message-filters-main select {
+  width: 100%;
+  min-width: 0;
+}
+
 .dashboard {
   max-width: 1200px;
   margin: 0 auto;
@@ -729,6 +788,14 @@ tbody tr:hover {
   .system-grid {
     grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
   }
+
+  .message-filters-main {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-areas:
+      "system flow"
+      "status time"
+      "header header";
+  }
 }
 
 @media (max-width: 520px) {
@@ -756,5 +823,15 @@ tbody tr:hover {
 
   .brand-footer {
     align-items: flex-start;
+  }
+
+  .message-filters-main {
+    grid-template-columns: 1fr;
+    grid-template-areas:
+      "system"
+      "flow"
+      "status"
+      "time"
+      "header";
   }
 }
