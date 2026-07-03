@@ -1887,6 +1887,69 @@ app.post("/api/cache/messages/sync", async (req, res) => {
   });
 });
 
+// Get distinct systems/packages and flows from SAP CPI (not from cache)
+app.get("/api/cache/systems", async (_req, res) => {
+  try {
+    const systems = new Set();
+    const flowsBySystem = new Map();
+    const allFlows = new Set();
+
+    // Ottieni gli interface direttamente da SAP CPI (stesso metodo di /api/cpi/overview)
+    const [interfacesPayload, packageLookup] = await Promise.all([
+      cpiGet("api/v1/IntegrationRuntimeArtifacts", {
+        $format: "json"
+      }),
+      getInterfacePackageLookup()
+    ]);
+
+    const interfaces = mapInterfaces(normalizeCpiCollection(interfacesPayload), packageLookup);
+
+    // Estrai sistemi e flow dai interface
+    interfaces.forEach((item) => {
+      const pkg = String(item.package || "").trim();
+      const name = String(item.name || "").trim();
+
+      if (pkg && pkg !== "UNKNOWN") {
+        systems.add(pkg);
+        
+        if (name) {
+          if (!flowsBySystem.has(pkg)) {
+            flowsBySystem.set(pkg, new Set());
+          }
+          flowsBySystem.get(pkg).add(name);
+          allFlows.add(name);
+        }
+      }
+    });
+
+    // Converti i Set in array e ordina
+    const systemsList = Array.from(systems).sort();
+    const flowsMap = {};
+    
+    flowsBySystem.forEach((flows, system) => {
+      flowsMap[system] = Array.from(flows).sort();
+    });
+
+    const allFlowsList = Array.from(allFlows).sort();
+
+    return res.json({
+      ok: true,
+      systems: systemsList,
+      flows: flowsMap,
+      allFlows: allFlowsList,
+      sourceInterfacesCount: interfaces.length
+    });
+  } catch (error) {
+    return res.status(500).json({
+      ok: false,
+      error: error.message,
+      systems: [],
+      flows: {},
+      allFlows: []
+    });
+  }
+});
+
 app.get("/api/cache/messages", (req, res) => {
   const statusFilter = String(req.query.status || "").trim().toUpperCase();
   const systemFilter = String(req.query.system || "").trim();

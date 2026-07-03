@@ -49,13 +49,18 @@ const closeAttachmentViewerBtnEl = document.getElementById("close-attachment-vie
 let overviewCache = {
   stats: null,
   interfaces: [],
-  messages: []
+  messages: [],
+  systems: [],
+  flows: {},
+  allFlows: []
 };
 
 let timerId = null;
 let currentPage = "dashboard";
 let messagesPageLoaded = false;
+let interfacesPageLoaded = false;
 let isMessagesPageLoading = false;
+let isInterfacesPageLoading = false;
 let messagesScopedToActiveInterface = false;
 let cacheStatusPollTimerId = null;
 let activeInterfaceMessageFilter = null;
@@ -136,6 +141,10 @@ function showPage(pageName) {
   const tabEl = document.querySelector(`.tab[data-page="${pageName}"]`);
   if (tabEl) {
     tabEl.classList.add("active");
+  }
+
+  if (pageName === "interfaces") {
+    loadInterfacesForPage();
   }
 
   if (pageName === "messages") {
@@ -662,31 +671,56 @@ function formatCacheStatus(meta, inProgress) {
   return `<span class="cache-status-lines">${lines.join("")}</span>`;
 }
 
-// Populate system filters
+// Extract Systems and Flows from cache (run once after loading cache)
+// Populate system filters - usa l'indice dei sistemi se disponibile
 function populateSystemFilters() {
-  const interfaceSystems = new Set();
-  const messageSystems = new Set();
-  const messageFlows = new Set();
-  
-  overviewCache.interfaces.forEach((item) => {
-    const system = getSystemForInterface(item);
-    interfaceSystems.add(system);
-  });
-  
-  overviewCache.messages.forEach((item) => {
-    const system = getSystemForMessage(item);
-    if (system && system !== "UNKNOWN") {
-      messageSystems.add(system);
+  try {
+    const interfacePackages = new Set();
+    let messagePackages = new Set();
+    let messageFlows = new Set();
+    const selectedPackage = String(messageSystemFilterEl?.value || "").trim();
+
+  // Se abbiamo l'indice completo dei sistemi, usalo
+  if (overviewCache.systems && overviewCache.systems.length > 0) {
+    messagePackages = new Set(overviewCache.systems);
+    messageFlows = new Set(overviewCache.allFlows || []);
+  } else {
+    // Fallback: estrai da messaggi (per compatibilità se l'indice non è caricato)
+    (overviewCache.messages || []).forEach((item) => {
+      const pkg = String(item.package || "").trim();
+      const iflow = String(item.integrationFlow || "").trim();
+
+      if (pkg && pkg !== "UNKNOWN") {
+        messagePackages.add(pkg);
+      }
+
+      if (iflow && (!selectedPackage || pkg === selectedPackage)) {
+        messageFlows.add(iflow);
+      }
+    });
+
+    // Se è selezionato un package specifico, filtra i flow
+    if (selectedPackage && overviewCache.flows && typeof overviewCache.flows === 'object' && overviewCache.flows[selectedPackage]) {
+      messageFlows = new Set(overviewCache.flows[selectedPackage]);
+    }
+  }
+
+  // Estrai da interfacce
+  (overviewCache.interfaces || []).forEach((item) => {
+    const ifacePackage = String(item.package || "").trim();
+    const ifaceName = String(item.name || "").trim();
+
+    if (ifacePackage && ifacePackage !== "UNKNOWN") {
+      interfacePackages.add(ifacePackage);
     }
 
-    const flow = String(item.integrationFlow || "").trim();
-    if (flow) {
-      messageFlows.add(flow);
+    if (ifaceName && (!selectedPackage || ifacePackage === selectedPackage)) {
+      messageFlows.add(ifaceName);
     }
   });
-  
-  const sortedInterfaceSystems = Array.from(interfaceSystems).sort();
-  const sortedMessageSystems = Array.from(messageSystems).sort();
+
+  const sortedInterfacePackages = Array.from(interfacePackages).sort();
+  const sortedMessagePackages = Array.from(messagePackages).sort();
   const sortedMessageFlows = Array.from(messageFlows).sort((a, b) => a.localeCompare(b));
 
   const updateSystemInput = (inputEl, datalistEl, systems) => {
@@ -702,29 +736,99 @@ function populateSystemFilters() {
     }
   };
   
-  updateSystemInput(interfaceSystemFilterEl, interfaceSystemOptionsEl, sortedInterfaceSystems);
-  updateSystemInput(messageSystemFilterEl, messageSystemOptionsEl, sortedMessageSystems);
+  updateSystemInput(interfaceSystemFilterEl, interfaceSystemOptionsEl, sortedInterfacePackages);
+  updateSystemInput(messageSystemFilterEl, messageSystemOptionsEl, sortedMessagePackages);
   updateSystemInput(messageFlowFilterEl, messageFlowOptionsEl, sortedMessageFlows);
+  } catch (error) {
+    console.error("Errore in populateSystemFilters:", error);
+  }
+}
+
+function updateMessageFlowsForSystem() {
+  try {
+    // Aggiorna i flow disponibili in base al sistema selezionato usando l'indice se disponibile
+    const selectedSystem = (messageSystemFilterEl?.value || "").trim();
+    let flowsForSystem = new Set();
+
+  // Se abbiamo l'indice completo, usalo
+  if (selectedSystem && overviewCache.flows && typeof overviewCache.flows === 'object' && overviewCache.flows[selectedSystem]) {
+    flowsForSystem = new Set(overviewCache.flows[selectedSystem]);
+  } else if (selectedSystem) {
+    // Fallback: estrai da messaggi
+    (overviewCache.messages || []).forEach((item) => {
+      const pkg = String(item.package || "").trim();
+      const iflow = String(item.integrationFlow || "").trim();
+
+      if (pkg === selectedSystem && iflow) {
+        flowsForSystem.add(iflow);
+      }
+    });
+
+    // Aggiungi anche i nomi delle interfacce per lo stesso package
+    (overviewCache.interfaces || []).forEach((item) => {
+      const ifacePackage = String(item.package || "").trim();
+      const ifaceName = String(item.name || "").trim();
+
+      if (ifacePackage === selectedSystem && ifaceName) {
+        flowsForSystem.add(ifaceName);
+      }
+    });
+  } else if (overviewCache.allFlows && overviewCache.allFlows.length > 0) {
+    // Se nessun sistema è selezionato e abbiamo l'indice, mostra tutti i flow
+    flowsForSystem = new Set(overviewCache.allFlows);
+  } else {
+    // Fallback: mostra tutti i flow dai messaggi
+    (overviewCache.messages || []).forEach((item) => {
+      const iflow = String(item.integrationFlow || "").trim();
+      if (iflow) {
+        flowsForSystem.add(iflow);
+      }
+    });
+
+    // Aggiungi anche i nomi delle interfacce
+    (overviewCache.interfaces || []).forEach((item) => {
+      const ifaceName = String(item.name || "").trim();
+      if (ifaceName) {
+        flowsForSystem.add(ifaceName);
+      }
+    });
+  }
+
+  const sortedFlows = Array.from(flowsForSystem).sort((a, b) => a.localeCompare(b));
+  
+  if (messageFlowFilterEl && messageFlowOptionsEl) {
+    const currentValue = (messageFlowFilterEl.value || "").trim();
+    messageFlowOptionsEl.innerHTML = sortedFlows.map((flow) => `<option value="${flow}"></option>`).join("");
+    
+    // Se il flow corrente non è più valido per il sistema selezionato, pulisci il campo
+    if (currentValue && !sortedFlows.includes(currentValue)) {
+      messageFlowFilterEl.value = "";
+    }
+  }
+  } catch (error) {
+    console.error("Errore in updateMessageFlowsForSystem:", error);
+  }
 }
 
 function populateBulkAttachmentFilters() {
-  const updateInputWithOptions = (inputEl, datalistEl, values) => {
-    if (!inputEl || !datalistEl) {
-      return;
-    }
+  try {
+    const updateInputWithOptions = (inputEl, datalistEl, values) => {
+      if (!inputEl || !datalistEl) {
+        return;
+      }
 
-    const sorted = Array.from(values).sort((a, b) => a.localeCompare(b));
-    const currentValue = String(inputEl.value || "").trim();
+      const sorted = Array.from(values).sort((a, b) => a.localeCompare(b));
+      const currentValue = String(inputEl.value || "").trim();
 
-    datalistEl.innerHTML = sorted.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
-    if (currentValue && !sorted.includes(currentValue)) {
-      inputEl.value = "";
-    }
-  };
+      datalistEl.innerHTML = sorted.map((value) => `<option value="${escapeHtml(value)}"></option>`).join("");
+      if (currentValue && !sorted.includes(currentValue)) {
+        inputEl.value = "";
+      }
+    };
 
-  const packageValues = new Set();
-  const iflowValues = new Set();
-  const selectedPackage = String(bulkPackageFilterEl?.value || "").trim();
+    const packageValues = new Set();
+    const iflowValues = new Set();
+    const selectedPackage = String(bulkPackageFilterEl?.value || "").trim();
 
   (overviewCache.messages || []).forEach((item) => {
     const pkg = String(item.package || "").trim();
@@ -755,6 +859,9 @@ function populateBulkAttachmentFilters() {
 
   updateInputWithOptions(bulkPackageFilterEl, bulkPackageOptionsEl, packageValues);
   updateInputWithOptions(bulkIflowFilterEl, bulkIflowOptionsEl, iflowValues);
+  } catch (error) {
+    console.error("Errore in populateBulkAttachmentFilters:", error);
+  }
 }
 
 function parseDownloadFileNameFromHeaders(response) {
@@ -1122,8 +1229,12 @@ function renderMessages() {
 
   messagesBodyEl.innerHTML = filtered
     .map(
-      (item) => `
+      (item) => {
+        const timestamp = getMessageTimestamp(item);
+        const formattedTimestamp = timestamp ? formatDate(new Date(timestamp).toISOString()) : "-";
+        return `
         <tr>
+          <td class="timestamp-cell">${formattedTimestamp}</td>
           <td><span class="system-badge">${getSystemForMessage(item)}</span></td>
           <td class="flow-compact">${formatFlowCompact(item.integrationFlow)}</td>
           <td>${formatMplLink(item)}</td>
@@ -1131,7 +1242,8 @@ function renderMessages() {
           <td class="custom-headers">${formatCustomHeaders(item.customHeaders)}</td>
           <td class="attachments-cell">${formatAttachmentsCell(item)}</td>
         </tr>
-      `
+      `;
+      }
     )
     .join("");
 }
@@ -1307,6 +1419,7 @@ function renderCurrentPage() {
       renderInterfaces();
       break;
     case "messages":
+      updateMessageFlowsForSystem();
       renderMessages();
       break;
     case "config":
@@ -1363,6 +1476,21 @@ async function fetchMessageCacheStatus() {
   return response.json();
 }
 
+async function loadCachedSystemsIndex() {
+  try {
+    const data = await fetchCachedSystems();
+    overviewCache.systems = data.systems || [];
+    overviewCache.flows = data.flows || {};
+    overviewCache.allFlows = data.allFlows || [];
+  } catch (error) {
+    console.log("Errore nel caricamento indice sistemi:", error);
+    // Usa valori di default se fallisce
+    overviewCache.systems = [];
+    overviewCache.flows = {};
+    overviewCache.allFlows = [];
+  }
+}
+
 async function fetchCachedMessages(limit = 0) {
   const query = new URLSearchParams();
   if (limit > 0) {
@@ -1374,6 +1502,16 @@ async function fetchCachedMessages(limit = 0) {
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.error || "Errore nel caricamento messaggi da cache");
+  }
+
+  return response.json();
+}
+
+async function fetchCachedSystems() {
+  const response = await fetch("/api/cache/systems");
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}));
+    throw new Error(payload.error || "Errore nel caricamento sistemi da cache");
   }
 
   return response.json();
@@ -1448,6 +1586,29 @@ async function startMessageCacheSync(force = true) {
   }
 }
 
+async function loadInterfacesForPage(force = false) {
+  if (isInterfacesPageLoading || (interfacesPageLoaded && !force)) {
+    return;
+  }
+
+  isInterfacesPageLoading = true;
+  try {
+    // Ricarica le interfacce complete dal backend
+    const data = await fetchOverview();
+    overviewCache.interfaces = data.interfaces || [];
+    
+    interfacesPageLoaded = true;
+    populateSystemFilters();
+    if (currentPage === "interfaces") {
+      renderInterfaces();
+    }
+  } catch (error) {
+    setError(error.message);
+  } finally {
+    isInterfacesPageLoading = false;
+  }
+}
+
 async function loadMessagesForPage(force = false, interfaceFilter = null) {
   const hasInterfaceFilter = Boolean(interfaceFilter?.id || interfaceFilter?.name);
   if (isMessagesPageLoading || (messagesPageLoaded && !force && !hasInterfaceFilter)) {
@@ -1465,6 +1626,7 @@ async function loadMessagesForPage(force = false, interfaceFilter = null) {
       overviewCache.messages = live.items || [];
       messagesScopedToActiveInterface = true;
     } else {
+      // Carica la cache completa per estrarre tutti i sistemi e flow disponibili
       const cached = await fetchCachedMessages(0);
       if (Array.isArray(cached.items) && cached.items.length > 0) {
         overviewCache.messages = cached.items;
@@ -1476,7 +1638,14 @@ async function loadMessagesForPage(force = false, interfaceFilter = null) {
     }
 
     messagesPageLoaded = true;
+    
+    // Carica l'indice completo dei sistemi/flows (se non ancora caricato)
+    if (!overviewCache.systems || overviewCache.systems.length === 0) {
+      await loadCachedSystemsIndex();
+    }
+    
     populateSystemFilters();
+    updateMessageFlowsForSystem();
     populateBulkAttachmentFilters();
     if (currentPage === "messages") {
       renderMessages();
@@ -1648,8 +1817,19 @@ if (applyServiceKeyBtnEl) applyServiceKeyBtnEl.addEventListener("click", applySe
 
 if (interfaceSystemFilterEl) interfaceSystemFilterEl.addEventListener("change", renderInterfaces);
 if (interfaceSystemFilterEl) interfaceSystemFilterEl.addEventListener("input", renderInterfaces);
-if (messageSystemFilterEl) messageSystemFilterEl.addEventListener("change", renderMessages);
-if (messageSystemFilterEl) messageSystemFilterEl.addEventListener("input", renderMessages);
+
+// Quando cambia il sistema dei messaggi, aggiorna i flow disponibili
+if (messageSystemFilterEl) {
+  messageSystemFilterEl.addEventListener("change", () => {
+    updateMessageFlowsForSystem();
+    renderMessages();
+  });
+  messageSystemFilterEl.addEventListener("input", () => {
+    updateMessageFlowsForSystem();
+    renderMessages();
+  });
+}
+
 if (messageFlowFilterEl) messageFlowFilterEl.addEventListener("change", renderMessages);
 if (messageFlowFilterEl) messageFlowFilterEl.addEventListener("input", renderMessages);
 if (messageStatusFilterEl) messageStatusFilterEl.addEventListener("change", renderMessages);
@@ -1756,6 +1936,7 @@ if (attachmentViewerBodyEl) {
 
 // Initialize
 initNavigation();
+loadCachedSystemsIndex();
 refresh();
 armAutoRefresh();
 loadConfigStatus();
