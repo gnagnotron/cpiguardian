@@ -281,6 +281,7 @@ async function syncMessagesCache({ force = false, maxItemsOverride = null } = {}
   messageCacheState.meta.attachmentsWithItems = 0;
   messageCacheState.meta.attachmentsFullyScanned = false;
   messageCacheState.meta.requestedMaxItems = Number.isFinite(safeMaxItems) ? safeMaxItems : cacheMaxItems;
+  messageCacheState.meta.maxItems = Number.isFinite(safeMaxItems) ? safeMaxItems : cacheMaxItems;
   messageCacheState.meta.estimatedTotalAvailable = null;
   messageCacheState.meta.targetDownloadCount = null;
   messageCacheState.meta.progressPercent = 0;
